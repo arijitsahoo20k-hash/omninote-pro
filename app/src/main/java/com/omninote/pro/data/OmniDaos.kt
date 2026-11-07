@@ -203,7 +203,7 @@ abstract class PageDao {
     @Insert
     abstract suspend fun insertOcr(entity: PageOcrFtsEntity)
 
-    @Query("SELECT * FROM page_ocr_fts WHERE notebookId = :notebookId")
+    @Query("SELECT rowid, pageId, notebookId, title, ocrText FROM page_ocr_fts WHERE notebookId = :notebookId")
     abstract suspend fun getOcrForNotebook(notebookId: String): List<PageOcrFtsEntity>
 
     @Query("SELECT MAX(updatedAt) FROM pages WHERE notebookId = :notebookId")
