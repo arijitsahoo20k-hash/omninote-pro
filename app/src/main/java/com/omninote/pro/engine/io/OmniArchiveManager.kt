@@ -183,12 +183,12 @@ class ArchiveCorruptedException(message: String) : IOException(message)
  * Lossless backup and restore.
  *
  * `.omninote`: one notebook. A ZIP whose first entry is `notebook_manifest.json`, followed by
- * `pages/{notebookId}/*.ompage`, `pdfs/{notebookId}.pdf`, `images/{notebookId}/*`, `audio/{notebookId}/*.m4a` and a final
+ * `pages/{notebookId}/{pageId}.ompage`, `pdfs/{notebookId}.pdf`, `images/{notebookId}/{file}`, `audio/{notebookId}/{file}.m4a` and a final
  * `checksums.json` with the CRC32 and size of every other entry. Import stages everything in the cache, verifies the
  * checksums (a truncated archive has no `checksums.json` and is rejected), and only then touches app data.
  *
  * `.omnibackup`: the whole vault, using the same entry layout plus `vault_manifest.json`, `manifests/{id}.json` per
- * notebook and `stickers/*.omsticker`.
+ * notebook and `stickers/{stickerId}.omsticker`.
  *
  * Every export first calls [PagePayloadStore.flushAll] so pending debounced saves are on disk.
  */
