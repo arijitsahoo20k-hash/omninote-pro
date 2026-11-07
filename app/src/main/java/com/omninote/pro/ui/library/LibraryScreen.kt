@@ -344,7 +344,7 @@ private fun Sidebar(
                 if (activeTags.isNotEmpty()) ChipButton("Clear", false, onClearTags)
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                val shown = (tags + com.omninote.pro.core.model.NotebookTag.DEFAULTS).distinct()
+                val shown = (tags + com.omninote.pro.core.model.NotebookTag.DEFAULTS.map { it.name }).distinct()
                 for (t in shown) ChipButton(t, t in activeTags, { onToggleTag(t) })
             }
         }

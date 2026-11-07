@@ -118,13 +118,14 @@ fun SplitScreenHost(
 
     BoxWithConstraints(modifier.fillMaxSize().background(Warm.Scrim)) {
         val dividerWidth = 26.dp
-        val totalPx = with(LocalDensity.current) { maxWidth.toPx() }
+        val containerWidth = maxWidth
+        val totalPx = with(LocalDensity.current) { containerWidth.toPx() }
         val split = panes.size == 2
 
         Row(Modifier.fillMaxSize()) {
             panes.forEachIndexed { i, spec ->
                 key(spec.paneId) {
-                    val widthMod = if (!split || i == 1) Modifier.weight(1f) else Modifier.width((maxWidth - dividerWidth) * ratio)
+                    val widthMod = if (!split || i == 1) Modifier.weight(1f) else Modifier.width((containerWidth - dividerWidth) * ratio)
                     Box(
                         widthMod
                             .fillMaxHeight()

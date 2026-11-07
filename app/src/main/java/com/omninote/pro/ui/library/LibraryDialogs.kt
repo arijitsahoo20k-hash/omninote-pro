@@ -200,7 +200,7 @@ internal fun TagEditDialog(
         if (clean.isNotEmpty() && "#$clean" !in tags) tags = tags + "#$clean"
         draft = ""
     }
-    val allSuggestions = (suggestions + com.omninote.pro.core.model.NotebookTag.DEFAULTS).distinct()
+    val allSuggestions = (suggestions + com.omninote.pro.core.model.NotebookTag.DEFAULTS.map { it.name }).distinct()
     LibraryDialog(onDismiss) {
         DialogTitle("Tags")
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

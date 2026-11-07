@@ -34,7 +34,17 @@ internal class SvgRecordingCanvas : Canvas() {
     private val pts = FloatArray(2)
 
     /** Current transform (page space to SVG user space is the identity: the root viewBox is page mm). */
-    val currentMatrix: Matrix get() = cur.matrix
+    val currentMatrix: Matrix get() = m()
+
+    /**
+     * Canvas.translate/scale/rotate/concat are final on current SDKs, so the underlying (bitmap-less) native canvas tracks
+     * the transform and it is read back here whenever a draw needs it.
+     */
+    @Suppress("DEPRECATION")
+    private fun m(): Matrix {
+        getMatrix(cur.matrix)
+        return cur.matrix
+    }
 
     fun raw(fragment: String) {
         body.append(fragment)
@@ -43,7 +53,8 @@ internal class SvgRecordingCanvas : Canvas() {
     // ---- state ----
 
     override fun save(): Int {
-        levels.add(Level(Matrix(cur.matrix)))
+        super.save()
+        levels.add(Level(Matrix()))
         cur = levels.last()
         return levels.size - 1
     }
@@ -56,6 +67,7 @@ internal class SvgRecordingCanvas : Canvas() {
         repeat(cur.clipGroups) { body.append("</g>") }
         levels.removeAt(levels.size - 1)
         cur = levels.last()
+        super.restore()
     }
 
     override fun getSaveCount(): Int = levels.size
@@ -71,30 +83,6 @@ internal class SvgRecordingCanvas : Canvas() {
         cur.clipGroups = 0
     }
 
-    override fun translate(dx: Float, dy: Float) {
-        cur.matrix.preTranslate(dx, dy)
-    }
-
-    override fun scale(sx: Float, sy: Float) {
-        cur.matrix.preScale(sx, sy)
-    }
-
-    override fun scale(sx: Float, sy: Float, px: Float, py: Float) {
-        cur.matrix.preScale(sx, sy, px, py)
-    }
-
-    override fun rotate(degrees: Float) {
-        cur.matrix.preRotate(degrees)
-    }
-
-    override fun rotate(degrees: Float, px: Float, py: Float) {
-        cur.matrix.preRotate(degrees, px, py)
-    }
-
-    override fun concat(matrix: Matrix?) {
-        if (matrix != null) cur.matrix.preConcat(matrix)
-    }
-
     override fun clipRect(rect: RectF): Boolean = true
 
     override fun clipRect(left: Float, top: Float, right: Float, bottom: Float): Boolean = true
@@ -102,7 +90,7 @@ internal class SvgRecordingCanvas : Canvas() {
     override fun clipPath(path: Path): Boolean {
         val id = "clip${clipCounter++}"
         defs.append("<clipPath id=\"").append(id).append("\"><path d=\"")
-        appendPath(defs, path, cur.matrix)
+        appendPath(defs, path, m())
         defs.append("\"/></clipPath>")
         body.append("<g clip-path=\"url(#").append(id).append(")\">")
         cur.clipGroups++
@@ -113,7 +101,7 @@ internal class SvgRecordingCanvas : Canvas() {
 
     override fun drawPath(path: Path, paint: Paint) {
         body.append("<path d=\"")
-        appendPath(body, path, cur.matrix)
+        appendPath(body, path, m())
         body.append('"')
         appendPaint(body, paint)
         body.append("/>")
@@ -196,8 +184,8 @@ internal class SvgRecordingCanvas : Canvas() {
     override fun drawText(text: String, x: Float, y: Float, paint: Paint) {
         pts[0] = x
         pts[1] = y
-        cur.matrix.mapPoints(pts)
-        val scale = cur.matrix.mapRadius(1f)
+        m().mapPoints(pts)
+        val scale = m().mapRadius(1f)
         body.append("<text x=\"").append(fmt(pts[0])).append("\" y=\"").append(fmt(pts[1]))
             .append("\" font-family=\"sans-serif\" font-size=\"").append(fmt(paint.textSize * scale)).append('"')
         when (paint.textAlign) {
@@ -219,7 +207,7 @@ internal class SvgRecordingCanvas : Canvas() {
         val a = (paint.color ushr 24) / 255f
         val rgb = hex(paint.color)
         val style = if (forceRoundCap) Paint.Style.STROKE else paint.style
-        val scale = cur.matrix.mapRadius(1f)
+        val scale = m().mapRadius(1f)
         when (style) {
             Paint.Style.FILL -> {
                 sb.append(" fill=\"").append(rgb).append("\" stroke=\"none\"")
@@ -285,7 +273,7 @@ internal class SvgRecordingCanvas : Canvas() {
         }
         pts[0] = x
         pts[1] = y
-        cur.matrix.mapPoints(pts)
+        m().mapPoints(pts)
         sb.append(fmt(pts[0])).append(' ').append(fmt(pts[1]))
     }
 
