@@ -16,28 +16,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoFixNormal
-import androidx.compose.material.icons.rounded.Category
-import androidx.compose.material.icons.rounded.FormatColorFill
-import androidx.compose.material.icons.rounded.Gesture
-import androidx.compose.material.icons.rounded.HideSource
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.MoreHoriz
-import androidx.compose.material.icons.rounded.Highlight
-import androidx.compose.material.icons.rounded.Layers
-import androidx.compose.material.icons.rounded.OpenWith
-import androidx.compose.material.icons.rounded.PanTool
 import androidx.compose.material.icons.rounded.Redo
-import androidx.compose.material.icons.rounded.Straighten
-import androidx.compose.material.icons.rounded.UnfoldLess
 import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material3.Checkbox
@@ -52,12 +38,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.omninote.pro.core.model.BrushConfig
 import com.omninote.pro.core.model.BrushType
 import com.omninote.pro.core.model.EraserMode
 import com.omninote.pro.core.model.FillType
@@ -67,14 +56,25 @@ import com.omninote.pro.data.DockEdge
 import com.omninote.pro.engine.ink.LassoMode
 import java.util.Locale
 
-private enum class Popover { NONE, ERASER, LASSO, FILL, TAPE, LASER, INSTRUMENT, DOCK }
+private enum class Popover { NONE, PEN, HIGHLIGHTER, ERASER, LASSO, FILL, TAPE, LASER, INSTRUMENT, MORE }
 
 /** HyperOS draws its 3-dots multitasking handle at the top centre; nothing interactive may sit in this band. */
 val TopCenterDeadzone = 180.dp
 
+/** Thickness of the slim tool strip. */
+val DockStripWidth: Dp = 46.dp
+
+/** Space the canvas gives up beside (or above / below) the expanded strip: the strip plus a small gap. */
+val DockReservedSpace: Dp = DockStripWidth + 6.dp
+
+private fun isPenGlyph(t: BrushType) = t != BrushType.HIGHLIGHTER && t != BrushType.STUDY_TAPE &&
+    t != BrushType.ERASER && t != BrushType.LASER_POINTER
+
 /**
- * The floating tool dock. It fills its parent, draws nothing outside the dock itself and lets every other touch pass
- * through to the canvas. Position and collapsed state come from (and are saved to) the user preferences.
+ * The slim tool strip: 46 dp wide, flush to the chosen screen edge. Top to bottom: Undo, Redo, Pen, Highlighter, Eraser,
+ * Lasso, Stickers/Shapes, Image, Text Box, Study Tape, Laser, then compact colour and thickness dots and a "more" button
+ * (ruler, fill bucket, audio pin, layers, dock position). Tapping the tool that is already active opens a compact
+ * popover beside the strip. It fills its parent, draws nothing outside itself and lets every other touch through.
  */
 @Composable
 fun FloatingPenDock(
@@ -82,7 +82,9 @@ fun FloatingPenDock(
     onOpenPenStudio: (slot: Int) -> Unit,
     onOpenStencils: () -> Unit,
     onOpenLayers: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenAudioPin: () -> Unit = {},
+    onOpenTextBox: () -> Unit = {}
 ) {
     val prefs by vm.preferences.collectAsState()
     val tool by vm.tool.collectAsState()
@@ -91,9 +93,6 @@ fun FloatingPenDock(
     val instrument by vm.instrument.collectAsState()
     val canUndo by vm.canUndo.collectAsState()
     val canRedo by vm.canRedo.collectAsState()
-    val undoLabel by vm.undoLabel.collectAsState()
-    val layerNumber by vm.activeLayerNumber.collectAsState()
-    val readMode by vm.readMode.collectAsState()
     var popover by remember { mutableStateOf(Popover.NONE) }
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) vm.importImage(uri)
@@ -103,9 +102,18 @@ fun FloatingPenDock(
     val vertical = edge == DockEdge.LEFT || edge == DockEdge.RIGHT
     val activeBrush = slots.getOrNull(activeSlot)
 
+    // The strip's Pen and Highlighter buttons point at a slot each: the active one when it matches, else the first match.
+    val penSlot = if (activeBrush != null && isPenGlyph(activeBrush.type)) activeSlot
+        else slots.indexOfFirst { isPenGlyph(it.type) }.takeIf { it >= 0 } ?: 0
+    val highlighterSlot = slots.indexOfFirst { it.type == BrushType.HIGHLIGHTER }
+    val tapeSlot = slots.indexOfFirst { it.type == BrushType.STUDY_TAPE }
+    val penCfg = slots.getOrNull(penSlot)
+    val highlighterCfg = slots.getOrNull(highlighterSlot)
+    val tapeCfg = slots.getOrNull(tapeSlot)
+
     fun toggle(p: Popover) { popover = if (popover == p) Popover.NONE else p }
 
-    Box(modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).padding(12.dp)) {
+    Box(modifier.fillMaxSize()) {
         if (prefs.dockCollapsed) {
             // The collapsed pill never sits top-centre (HyperOS handle): a top dock collapses into the top-right corner.
             val align = when (edge) {
@@ -115,7 +123,7 @@ fun FloatingPenDock(
                 DockEdge.RIGHT -> Alignment.CenterEnd
             }
             MiniPill(
-                modifier = Modifier.align(align),
+                modifier = Modifier.align(align).padding(8.dp),
                 type = activeBrush?.type ?: BrushType.BALLPOINT,
                 color = activeBrush?.colorArgb ?: BrushConfigDefaultInk,
                 onExpand = { vm.userPrefs.setDock(edge, false) }
@@ -134,21 +142,40 @@ fun FloatingPenDock(
             if (popover != Popover.NONE) {
                 Column(
                     Modifier
-                        .width(300.dp)
-                        .glass(RoundedCornerShape(20.dp), raised = true, elevation = 14.dp)
+                        .padding(6.dp)
+                        .width(290.dp)
+                        .glass(RoundedCornerShape(18.dp), raised = true, elevation = 14.dp)
                         .verticalScroll(rememberScrollState())
-                        .padding(14.dp)
+                        .padding(12.dp)
                 ) {
                     when (popover) {
+                        Popover.PEN -> PenPopover(
+                            vm = vm,
+                            slots = slots,
+                            activeSlot = activeSlot,
+                            group = { isPenGlyph(it) },
+                            onOpenStudio = { onOpenPenStudio(penSlot); popover = Popover.NONE }
+                        )
+                        Popover.HIGHLIGHTER -> PenPopover(
+                            vm = vm,
+                            slots = slots,
+                            activeSlot = activeSlot,
+                            group = { it == BrushType.HIGHLIGHTER },
+                            onOpenStudio = { onOpenPenStudio(highlighterSlot.coerceAtLeast(0)); popover = Popover.NONE }
+                        )
                         Popover.ERASER -> EraserPopover(vm)
                         Popover.LASSO -> LassoPopover(vm)
                         Popover.FILL -> FillPopover(vm)
                         Popover.TAPE -> TapePopover(vm)
                         Popover.LASER -> LaserPopover(vm)
                         Popover.INSTRUMENT -> InstrumentPopover(vm)
-                        Popover.DOCK -> DockPopover(
+                        Popover.MORE -> MorePopover(
                             fillSelected = tool == WorkspaceTool.FILL_BUCKET,
+                            rulerActive = instrument != GeometryInstrument.NONE,
                             onFill = { popover = Popover.FILL; vm.setTool(WorkspaceTool.FILL_BUCKET) },
+                            onRuler = { popover = Popover.INSTRUMENT },
+                            onAudioPin = { popover = Popover.NONE; onOpenAudioPin() },
+                            onLayers = { popover = Popover.NONE; onOpenLayers() },
                             current = edge,
                             onPick = { vm.userPrefs.setDock(it, false); popover = Popover.NONE },
                             onCollapse = { vm.userPrefs.setDock(edge, true); popover = Popover.NONE }
@@ -159,24 +186,62 @@ fun FloatingPenDock(
             }
         }
 
-        val dockContent: @Composable () -> Unit = {
-            DockBody(vertical = vertical) {
-                // ---- group 1: pens, colours, thickness
-                for ((i, cfg) in slots.withIndex()) {
-                    PresetPill(
-                        type = cfg.type,
-                        color = cfg.colorArgb,
-                        widthMm = cfg.widthMm,
-                        selected = tool == WorkspaceTool.INK && i == activeSlot,
-                        onClick = {
-                            popover = Popover.NONE
-                            if (tool == WorkspaceTool.INK && i == activeSlot) onOpenPenStudio(i) else vm.selectPresetSlot(i)
-                        }
-                    )
+        val stripContent: @Composable () -> Unit = {
+            StripBody(edge = edge) {
+                StripButton(Icons.Rounded.Undo, "Undo", selected = false, enabled = canUndo) { vm.undo() }
+                StripButton(Icons.Rounded.Redo, "Redo", selected = false, enabled = canRedo) { vm.redo() }
+                StripDivider(vertical)
+
+                // Pen: angled nib in the live ink colour.
+                StripGlyphButton(
+                    label = "Pen",
+                    selected = tool == WorkspaceTool.INK && activeBrush != null && isPenGlyph(activeBrush.type),
+                    onClick = {
+                        val active = tool == WorkspaceTool.INK && activeBrush != null && isPenGlyph(activeBrush.type)
+                        if (active) toggle(Popover.PEN) else { popover = Popover.NONE; vm.selectPresetSlot(penSlot) }
+                    }
+                ) {
+                    BrushTypeIcon(penCfg?.type ?: BrushType.FOUNTAIN_PEN, Color(penCfg?.colorArgb ?: BrushConfigDefaultInk), size = 28.dp, angleDeg = 38f)
                 }
+                StripGlyphButton(
+                    label = "Highlighter",
+                    selected = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.HIGHLIGHTER,
+                    onClick = {
+                        val active = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.HIGHLIGHTER
+                        if (active) toggle(Popover.HIGHLIGHTER) else if (highlighterSlot >= 0) { popover = Popover.NONE; vm.selectPresetSlot(highlighterSlot) }
+                    }
+                ) {
+                    BrushTypeIcon(BrushType.HIGHLIGHTER, Color(highlighterCfg?.colorArgb ?: 0xFFFFD54A.toInt()), size = 28.dp, angleDeg = 38f)
+                }
+                StripGlyphButton("Eraser", tool == WorkspaceTool.ERASER, onClick = {
+                    if (tool == WorkspaceTool.ERASER) toggle(Popover.ERASER) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.ERASER) }
+                }) { BrushTypeIcon(BrushType.ERASER, Warm.Text, size = 28.dp) }
+                StripGlyphButton("Lasso", tool == WorkspaceTool.LASSO, onClick = {
+                    if (tool == WorkspaceTool.LASSO) toggle(Popover.LASSO) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.LASSO) }
+                }) { OmniVectorIcon(OmniIconKind.LASSO, Warm.AccentBlue, size = 28.dp) }
+                StripDivider(vertical)
+                StripGlyphButton("Stickers and shapes", false, onClick = { popover = Popover.NONE; onOpenStencils() }) {
+                    OmniVectorIcon(OmniIconKind.STICKERS, Warm.AccentBlue, size = 26.dp)
+                }
+                StripButton(Icons.Rounded.Image, "Image", selected = false) { popover = Popover.NONE; pickImage.launch("image/*") }
+                StripGlyphButton("Text box", false, onClick = { popover = Popover.NONE; onOpenTextBox() }) {
+                    OmniVectorIcon(OmniIconKind.TEXT_BOX, Warm.AccentBlue, size = 26.dp)
+                }
+                val tapeActive = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.STUDY_TAPE
+                StripGlyphButton("Study tape", tapeActive, onClick = {
+                    if (tapeActive) toggle(Popover.TAPE) else {
+                        if (tapeSlot >= 0) vm.selectPresetSlot(tapeSlot)
+                        popover = Popover.TAPE
+                    }
+                }) { BrushTypeIcon(BrushType.STUDY_TAPE, Color(tapeCfg?.colorArgb ?: 0xFFF2C94C.toInt()), size = 28.dp) }
+                StripGlyphButton("Laser", tool == WorkspaceTool.LASER, onClick = {
+                    if (tool == WorkspaceTool.LASER) toggle(Popover.LASER) else { vm.setTool(WorkspaceTool.LASER); popover = Popover.LASER }
+                }) { BrushTypeIcon(BrushType.LASER_POINTER, Color(0xFFFF4D4D), size = 28.dp) }
+                StripDivider(vertical)
+
                 if (activeBrush != null) {
-                    val palette = (AcademicPalettes.byId(prefs.activePalette).colors + prefs.customSwatches).take(5)
-                    QuickStyle(
+                    val palette = (AcademicPalettes.byId(prefs.activePalette).colors + prefs.customSwatches).take(3)
+                    CompactStyleDots(
                         vertical = vertical,
                         colors = palette,
                         currentColor = activeBrush.colorArgb,
@@ -186,60 +251,16 @@ fun FloatingPenDock(
                         onWidth = { w -> vm.updatePresetSlot(activeSlot, activeBrush.copy(widthMm = w)) }
                     )
                 }
-                DockDivider(vertical)
-
-                // ---- group 2: tools
-                DockTool(Icons.Rounded.AutoFixNormal, "Eraser", tool == WorkspaceTool.ERASER) {
-                    if (tool == WorkspaceTool.ERASER) toggle(Popover.ERASER) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.ERASER) }
-                }
-                DockTool(Icons.Rounded.Gesture, "Lasso", tool == WorkspaceTool.LASSO) {
-                    if (tool == WorkspaceTool.LASSO) toggle(Popover.LASSO) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.LASSO) }
-                }
-                DockTool(Icons.Rounded.Image, "Image", false) {
-                    popover = Popover.NONE
-                    pickImage.launch("image/*")
-                }
-                DockTool(Icons.Rounded.Category, "Shapes", false) { popover = Popover.NONE; onOpenStencils() }
-                DockTool(Icons.Rounded.Straighten, "Ruler", instrument != GeometryInstrument.NONE) { toggle(Popover.INSTRUMENT) }
-                val tapeActive = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.STUDY_TAPE
-                DockTool(Icons.Rounded.HideSource, "Tape", tapeActive) {
-                    if (tapeActive) toggle(Popover.TAPE) else {
-                        val tapeSlot = slots.indexOfFirst { it.type == BrushType.STUDY_TAPE }
-                        if (tapeSlot >= 0) vm.selectPresetSlot(tapeSlot)
-                        popover = Popover.TAPE
-                    }
-                }
-                DockTool(Icons.Rounded.Highlight, "Laser", tool == WorkspaceTool.LASER) {
-                    if (tool == WorkspaceTool.LASER) toggle(Popover.LASER) else { vm.setTool(WorkspaceTool.LASER); popover = Popover.LASER }
-                }
-                DockTool(Icons.Rounded.PanTool, "Read", readMode || tool == WorkspaceTool.HAND_PAN) {
-                    popover = Popover.NONE
-                    if (tool == WorkspaceTool.HAND_PAN) vm.setTool(WorkspaceTool.INK)
-                    vm.toggleReadMode()
-                }
-                DockDivider(vertical)
-
-                // ---- group 3: history and layers
-                UndoRedoPair(canUndo, canRedo, undoLabel, vertical, onUndo = vm::undo, onRedo = vm::redo)
-                LayerButton(layerNumber) { popover = Popover.NONE; onOpenLayers() }
-                DockTool(Icons.Rounded.MoreHoriz, "More", popover == Popover.DOCK) { toggle(Popover.DOCK) }
+                StripButton(Icons.Rounded.MoreHoriz, "More", selected = popover == Popover.MORE) { toggle(Popover.MORE) }
             }
         }
 
         val arrangement: @Composable () -> Unit = {
             when (edge) {
-                DockEdge.BOTTOM -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    popoverContent(); dockContent()
-                }
-                DockEdge.TOP -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    dockContent(); popoverContent()
-                }
-                DockEdge.LEFT -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    dockContent(); popoverContent()
-                }
-                DockEdge.RIGHT -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    popoverContent(); dockContent()
-                }
+                DockEdge.BOTTOM -> Column(horizontalAlignment = Alignment.CenterHorizontally) { popoverContent(); stripContent() }
+                DockEdge.TOP -> Column(horizontalAlignment = Alignment.CenterHorizontally) { stripContent(); popoverContent() }
+                DockEdge.LEFT -> Row(verticalAlignment = Alignment.CenterVertically) { stripContent(); popoverContent() }
+                DockEdge.RIGHT -> Row(verticalAlignment = Alignment.CenterVertically) { popoverContent(); stripContent() }
             }
         }
         Box(Modifier.align(align)) { arrangement() }
@@ -249,61 +270,85 @@ fun FloatingPenDock(
 private const val BrushConfigDefaultInk: Int = 0xFF111111.toInt()
 
 @Composable
-private fun DockBody(vertical: Boolean, content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(28.dp)
-    if (vertical) {
+private fun StripBody(edge: DockEdge, content: @Composable () -> Unit) {
+    val r = 18.dp
+    val shape = when (edge) {
+        DockEdge.LEFT -> RoundedCornerShape(topEnd = r, bottomEnd = r)
+        DockEdge.RIGHT -> RoundedCornerShape(topStart = r, bottomStart = r)
+        DockEdge.TOP -> RoundedCornerShape(bottomStart = r, bottomEnd = r)
+        DockEdge.BOTTOM -> RoundedCornerShape(topStart = r, topEnd = r)
+    }
+    if (edge == DockEdge.LEFT || edge == DockEdge.RIGHT) {
         Column(
             Modifier
-                .glass(shape, raised = true, elevation = 16.dp)
+                .width(DockStripWidth)
+                .glass(shape, raised = true, elevation = 12.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(vertical = 8.dp, horizontal = 6.dp),
+                .padding(vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) { content() }
     } else {
         Row(
             Modifier
-                .glass(shape, raised = true, elevation = 16.dp)
+                .height(DockStripWidth)
+                .glass(shape, raised = true, elevation = 12.dp)
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) { content() }
     }
 }
 
 @Composable
-private fun DockDivider(vertical: Boolean) {
-    if (vertical) Box(Modifier.padding(vertical = 4.dp).width(28.dp).height(1.dp).background(Warm.Divider))
-    else Box(Modifier.padding(horizontal = 4.dp).height(32.dp).width(1.dp).background(Warm.Divider))
+private fun StripDivider(vertical: Boolean) {
+    if (vertical) Box(Modifier.padding(vertical = 3.dp).width(24.dp).height(1.dp).background(Warm.Divider))
+    else Box(Modifier.padding(horizontal = 3.dp).height(24.dp).width(1.dp).background(Warm.Divider))
 }
 
+/** One 40 dp tool cell with a vector-icon glyph. */
 @Composable
-private fun PresetPill(type: BrushType, color: Int, widthMm: Float, selected: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
-    Column(
+private fun StripGlyphButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    glyph: @Composable () -> Unit
+) {
+    val shape = RoundedCornerShape(11.dp)
+    Box(
         Modifier
-            .width(52.dp)
+            .size(40.dp)
+            .clip(shape)
             .background(if (selected) Warm.AccentSoft else Color.Transparent, shape)
             .border(1.dp, if (selected) Warm.Accent else Color.Transparent, shape)
-            .clickable(onClick = onClick)
-            .padding(vertical = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Box(
-                Modifier
-                    .size(34.dp)
-                    .border(3.dp, Color(color), CircleShape)
-            )
-            BrushTypeIcon(type, tint = Color(color), size = 22.dp)
-        }
-        Text(
-            formatMm(widthMm),
-            color = if (selected) Warm.Text else Warm.TextMuted,
-            fontSize = 10.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1
+        // The label is the accessibility description; the strip is too narrow for captions.
+        Box(Modifier.size(28.dp).semantics { contentDescription = label }) { glyph() }
+    }
+}
+
+/** A strip cell for a Material icon. */
+@Composable
+private fun StripButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    StripGlyphButton(label, selected, onClick, enabled) {
+        Icon(
+            icon, label,
+            tint = when {
+                !enabled -> Warm.TextMuted.copy(alpha = 0.4f)
+                selected -> Warm.Accent
+                else -> Warm.Text
+            },
+            modifier = Modifier.size(24.dp)
         )
     }
 }
@@ -315,78 +360,17 @@ internal fun formatMm(mm: Float): String = when {
 }
 
 @Composable
-private fun DockTool(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(50.dp)) {
-        ToolButton(selected = selected, onClick = onClick, size = 42.dp) {
-            Icon(icon, label, tint = if (selected) Warm.Accent else Warm.Text)
-        }
-        Text(label, color = Warm.TextMuted, fontSize = 10.sp, maxLines = 1)
-    }
-}
-
-@Composable
-private fun UndoRedoPair(
-    canUndo: Boolean,
-    canRedo: Boolean,
-    undoLabel: String?,
-    vertical: Boolean,
-    onUndo: () -> Unit,
-    onRedo: () -> Unit
-) {
-    val content: @Composable () -> Unit = {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(56.dp)) {
-            ToolButton(selected = false, onClick = onUndo, size = 42.dp, enabled = canUndo) {
-                Icon(Icons.Rounded.Undo, "Undo", tint = if (canUndo) Warm.Text else Warm.TextMuted.copy(alpha = 0.4f))
-            }
-            Text(
-                undoLabel ?: "Undo",
-                color = if (canUndo) Warm.Accent else Warm.TextMuted,
-                fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(50.dp)) {
-            ToolButton(selected = false, onClick = onRedo, size = 42.dp, enabled = canRedo) {
-                Icon(Icons.Rounded.Redo, "Redo", tint = if (canRedo) Warm.Text else Warm.TextMuted.copy(alpha = 0.4f))
-            }
-            Text("Redo", color = Warm.TextMuted, fontSize = 10.sp, maxLines = 1)
-        }
-    }
-    if (vertical) Column(horizontalAlignment = Alignment.CenterHorizontally) { content() }
-    else Row(verticalAlignment = Alignment.Top) { content() }
-}
-
-@Composable
-private fun LayerButton(layerNumber: Int, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(50.dp)) {
-        ToolButton(selected = false, onClick = onClick, size = 42.dp) {
-            Box(contentAlignment = Alignment.BottomEnd) {
-                Icon(Icons.Rounded.Layers, "Layers", tint = Warm.Text, modifier = Modifier.size(26.dp))
-                Box(
-                    Modifier
-                        .background(Warm.Accent, RoundedCornerShape(6.dp))
-                        .padding(horizontal = 3.dp)
-                ) { Text("L$layerNumber", color = Color(0xFF2A1A10), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
-            }
-        }
-        Text("Layers", color = Warm.TextMuted, fontSize = 10.sp, maxLines = 1)
-    }
-}
-
-@Composable
 private fun MiniPill(modifier: Modifier, type: BrushType, color: Int, onExpand: () -> Unit) {
     Row(
         modifier
             .glass(RoundedCornerShape(50), raised = true, elevation = 12.dp)
             .clickable(onClick = onExpand)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        BrushTypeIcon(type, tint = Color(color), size = 22.dp)
-        ColorDot(color, 14.dp)
-        Icon(Icons.Rounded.UnfoldMore, "Expand dock", tint = Warm.TextMuted, modifier = Modifier.size(20.dp))
+        BrushTypeIcon(type, tint = Color(color), size = 22.dp, angleDeg = 38f)
+        Icon(Icons.Rounded.UnfoldMore, "Expand dock", tint = Warm.TextMuted, modifier = Modifier.size(18.dp))
     }
 }
 
@@ -451,7 +435,7 @@ private fun FilterCheck(label: String, checked: Boolean, onChange: (Boolean) -> 
             colors = CheckboxDefaults.colors(
                 checkedColor = Warm.Accent,
                 uncheckedColor = Warm.TextMuted,
-                checkmarkColor = Color(0xFF2A1A10)
+                checkmarkColor = Color(0xFFFFFFFF)
             )
         )
         Text(label, color = Warm.Text, fontSize = 14.sp)
@@ -533,15 +517,69 @@ private fun InstrumentPopover(vm: WorkspaceViewModel) {
 }
 
 @Composable
-private fun DockPopover(
+private fun PenPopover(
+    vm: WorkspaceViewModel,
+    slots: List<BrushConfig>,
+    activeSlot: Int,
+    group: (BrushType) -> Boolean,
+    onOpenStudio: () -> Unit
+) {
+    val prefs by vm.preferences.collectAsState()
+    SectionLabel("Favourite slots")
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for ((i, cfg) in slots.withIndex()) {
+            if (!group(cfg.type)) continue
+            val sel = i == activeSlot
+            val shape = RoundedCornerShape(14.dp)
+            androidx.compose.foundation.layout.Column(
+                Modifier
+                    .width(54.dp)
+                    .clip(shape)
+                    .background(if (sel) Warm.AccentSoft else Color.Transparent, shape)
+                    .border(1.dp, if (sel) Warm.Accent else Warm.Divider, shape)
+                    .clickable { vm.selectPresetSlot(i) }
+                    .padding(vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                BrushTypeIcon(cfg.type, Color(cfg.colorArgb), size = 26.dp, angleDeg = 38f)
+                Text(formatMm(cfg.widthMm), color = if (sel) Warm.Text else Warm.TextMuted, fontSize = 10.sp, maxLines = 1)
+            }
+        }
+    }
+    val cfg = slots.getOrNull(activeSlot)
+    if (cfg != null) {
+        SectionLabel("Colour")
+        val palette = (AcademicPalettes.byId(prefs.activePalette).colors + prefs.customSwatches).take(12)
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (c in palette) {
+                Box(Modifier.clickable { vm.updatePresetSlot(activeSlot, cfg.copy(colorArgb = c)) }.padding(2.dp)) {
+                    ColorDot(c, 26.dp, ring = c == cfg.colorArgb)
+                }
+            }
+        }
+    }
+    Box(Modifier.padding(top = 10.dp)) { ChipButton("Pen studio\u2026", false, onOpenStudio) }
+}
+
+@Composable
+private fun MorePopover(
     fillSelected: Boolean,
+    rulerActive: Boolean,
     onFill: () -> Unit,
+    onRuler: () -> Unit,
+    onAudioPin: () -> Unit,
+    onLayers: () -> Unit,
     current: DockEdge,
     onPick: (DockEdge) -> Unit,
     onCollapse: () -> Unit
 ) {
-    SectionLabel("Fill bucket")
-    ChipButton("Fill bucket", fillSelected, onFill)
+    SectionLabel("Insert and tools")
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+        ChipButton("Fill bucket", fillSelected, onFill)
+        ChipButton("Ruler", rulerActive, onRuler)
+        ChipButton("Audio pin", false, onAudioPin)
+        ChipButton("Layers", false, onLayers)
+    }
     SectionLabel("Dock position")
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
         ChipButton("Top", current == DockEdge.TOP, { onPick(DockEdge.TOP) })
@@ -552,9 +590,9 @@ private fun DockPopover(
     Box(Modifier.padding(top = 10.dp)) { ChipButton("Collapse to pill", false, onCollapse) }
 }
 
-/** Five palette swatches and three thickness dots for the active pen. */
+/** Three colour dots and three thickness dots for the active pen, sized for the 46 dp strip. */
 @Composable
-private fun QuickStyle(
+private fun CompactStyleDots(
     vertical: Boolean,
     colors: List<Int>,
     currentColor: Int,
@@ -567,21 +605,15 @@ private fun QuickStyle(
     val nearest = widths.indices.minByOrNull { kotlin.math.abs(widths[it] - currentWidth) } ?: 1
     val swatches: @Composable () -> Unit = {
         for (c in colors) {
-            Box(Modifier.clickable { onColor(c) }.padding(2.dp)) { ColorDot(c, 20.dp, ring = c == currentColor) }
+            Box(Modifier.clickable { onColor(c) }.padding(2.dp)) { ColorDot(c, 12.dp, ring = c == currentColor) }
         }
     }
     val dots: @Composable () -> Unit = {
         for ((i, w) in widths.withIndex()) {
-            val d = (7 + i * 4).dp
-            Box(
-                Modifier
-                    .size(26.dp)
-                    .clickable { onWidth(w) },
-                contentAlignment = Alignment.Center
-            ) {
+            Box(Modifier.size(14.dp).clickable { onWidth(w) }, contentAlignment = Alignment.Center) {
                 Box(
                     Modifier
-                        .size(d)
+                        .size((4 + i * 3).dp)
                         .background(if (i == nearest) Warm.Accent else Warm.TextMuted.copy(alpha = 0.6f), CircleShape)
                 )
             }
@@ -589,14 +621,15 @@ private fun QuickStyle(
     }
     if (vertical) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Row { for (c in colors.take(3)) Box(Modifier.clickable { onColor(c) }.padding(1.dp)) { ColorDot(c, 14.dp, ring = c == currentColor) } }
-            Row { for (c in colors.drop(3)) Box(Modifier.clickable { onColor(c) }.padding(1.dp)) { ColorDot(c, 14.dp, ring = c == currentColor) } }
-            Row { dots() }
-        }
-    } else {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Row(verticalAlignment = Alignment.CenterVertically) { swatches() }
             Row(verticalAlignment = Alignment.CenterVertically) { dots() }
+        }
+    } else {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(verticalAlignment = Alignment.CenterVertically) { swatches() }
+                Row(verticalAlignment = Alignment.CenterVertically) { dots() }
+            }
         }
     }
 }

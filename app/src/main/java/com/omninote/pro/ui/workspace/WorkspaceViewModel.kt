@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.omninote.pro.core.model.AffineTransform2D
+import com.omninote.pro.core.model.AudioClipElement
 import com.omninote.pro.core.model.BrushConfig
 import com.omninote.pro.core.model.BrushType
 import com.omninote.pro.core.model.EraserMode
@@ -18,6 +20,7 @@ import com.omninote.pro.core.model.PointMm
 import com.omninote.pro.core.model.Stroke
 import com.omninote.pro.core.model.StrokeBounds
 import com.omninote.pro.core.model.TemplateConfig
+import com.omninote.pro.data.AddElement
 import com.omninote.pro.data.AddLayer
 import com.omninote.pro.data.CanvasEditCommand
 import com.omninote.pro.data.DeleteLayer
@@ -26,6 +29,7 @@ import com.omninote.pro.data.OmniDatabase
 import com.omninote.pro.data.PageMetaEntity
 import com.omninote.pro.data.PagePayloadStore
 import com.omninote.pro.data.PageSaveEvent
+import com.omninote.pro.data.RemoveElements
 import com.omninote.pro.data.RenameLayer
 import com.omninote.pro.data.ReorderLayers
 import com.omninote.pro.data.SetLayerLocked
@@ -35,6 +39,7 @@ import com.omninote.pro.data.SpatialRTreeIndex
 import com.omninote.pro.data.StickerCollectionEntity
 import com.omninote.pro.data.StickerElementEntity
 import com.omninote.pro.data.ToggleStudyTapeMask
+import com.omninote.pro.data.TransformElements
 import com.omninote.pro.data.UndoRedoStackManager
 import com.omninote.pro.data.UserPreferences
 import com.omninote.pro.data.UserPreferencesStore
@@ -87,6 +92,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -117,7 +123,13 @@ sealed interface WorkspaceEvent {
 }
 
 /** The page the canvas should show. [revision] changes only when the view must be re-pointed (undo, layer edit, page switch). */
-data class PageSnapshot(val page: NotebookPage, val revision: Long)
+data class PageSnapshot(
+    val page: NotebookPage,
+    val revision: Long,
+    /** The sheet above / below the current one in the continuous stack (null on the first / last page). */
+    val previous: NotebookPage? = null,
+    val next: NotebookPage? = null
+)
 
 data class SelectionInfo(val count: Int, val boundsMm: StrokeBounds)
 
@@ -234,9 +246,9 @@ class WorkspaceViewModel(
     /** Read/Scroll mode: one finger scrolls the page and pulling past an edge turns the page. */
     val readMode: StateFlow<Boolean> = _readMode.asStateFlow()
 
-    private val _edgePull = MutableStateFlow(0)
-    /** -1 = pulled past the top (previous page), +1 = pulled past the bottom (next page), 0 = none. */
-    val edgePull: StateFlow<Int> = _edgePull.asStateFlow()
+    private val _zoomLocked = MutableStateFlow(false)
+    /** "Lock Zoom": pinch and rotate are ignored until unlocked. */
+    val zoomLocked: StateFlow<Boolean> = _zoomLocked.asStateFlow()
 
     private val _instrument = MutableStateFlow(GeometryInstrument.NONE)
     val instrument: StateFlow<GeometryInstrument> = _instrument.asStateFlow()
@@ -298,13 +310,34 @@ class WorkspaceViewModel(
     private var opacityDragBase: NotebookPage? = null
     private var lastSelectionIds: Set<String> = emptySet()
     private var pendingSelectIds: Set<String> = emptySet()
+    private val neighbourCache = HashMap<String, NotebookPage>()
     private val _replayVisible = MutableStateFlow(false)
-    private val exporter by lazy { SvgAndRasterExporter(ExportRenderKit(context, deps.stencils), pageDao, store) }
+    // ---- voice-note pins (AudioClipElement) ----
+    /** The voice notes on the current page, in the order they were recorded. */
+    val audioClips: StateFlow<List<AudioClipElement>> = _pageSync
+        .map { snap -> snap?.page?.layers?.flatMap { it.audioClips }?.sortedBy { it.createdAtMs } ?: emptyList() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    private val _selectedClipId = MutableStateFlow<String?>(null)
+    val selectedClipId: StateFlow<String?> = _selectedClipId.asStateFlow()
+    private val _activeClipId = MutableStateFlow<String?>(null)
+    private var loadedClipId: String? = null
+    private val _pinPlacement = MutableStateFlow(false)
+    /** "Pin to Spot on Note" is on: the next tap on the page drops the selected voice note there. */
+    val pinPlacementActive: StateFlow<Boolean> = _pinPlacement.asStateFlow()
+    private var recordingClipId: String? = null
+
+    /** The clip whose audio is playing right now (null when paused or stopped). */
+    val playingClipId: StateFlow<String?> = combine(_activeClipId, player.isPlaying) { id, playing -> if (playing) id else null }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private val exporter by lazy { SvgAndRasterExporter(ExportRenderKit(context, deps.stencils, notebookDao), pageDao, store) }
 
     init {
         prefs.attachPenManager(penButtons, viewModelScope)
         viewModelScope.launch { penButtons.state.collect { onPenState(it) } }
         viewModelScope.launch { prefs.state.collect { applyToolToView() } }
+        viewModelScope.launch { playingClipId.collect { view?.setPlayingClip(it) } }
         viewModelScope.launch {
             store.events.collect { ev ->
                 if (ev is PageSaveEvent.Failed && ev.notebookId == notebookId) {
@@ -317,6 +350,7 @@ class WorkspaceViewModel(
             kotlinx.coroutines.flow.combine(player.playbackPositionMs, _replayVisible) { pos, visible -> if (visible) pos else null }
                 .collect { view?.setAudioPlaybackMs(it) }
         }
+        viewModelScope.launch { _pages.collect { syncSheetInfo() } }
         viewModelScope.launch { loadNotebook() }
     }
 
@@ -331,6 +365,7 @@ class WorkspaceViewModel(
             return
         }
         _notebook.value = entity.toModel(notebookDao.getTagNames(notebookId))
+        applyToolToView()
         val metas = pageDao.getPages(notebookId)
         _pages.value = metas
         if (metas.isEmpty()) {
@@ -357,6 +392,12 @@ class WorkspaceViewModel(
         val safeLayers = if (layers.isNullOrEmpty()) listOf(blankLayer(meta.pageId, 0)) else layers
         val loaded = meta.toPage(safeLayers).copy(index = i)
 
+        // The sheet we are leaving becomes a neighbour: keep its latest in-memory content (it may be newer than disk).
+        _pageSync.value?.page?.let { old -> if (old.id != loaded.id) neighbourCache[old.id] = old }
+        val previous = neighbourSheet(metas, i - 1)
+        val next = neighbourSheet(metas, i + 1)
+        neighbourCache.keys.retainAll(listOfNotNull(previous?.id, next?.id).toSet())
+
         stopRecordingIfActive()
         index.clear()
         index.bulkLoad(loaded.layers.flatMap { it.spatialRefs() })
@@ -365,16 +406,46 @@ class WorkspaceViewModel(
         if (loaded.layerById(_activeLayerId.value) == null) {
             _activeLayerId.value = loaded.layers.minByOrNull { it.zIndex }?.id ?: ""
         }
-        publish(loaded)
+        publish(loaded, previous, next)
+        syncSheetInfo()
         loaded.pdfPageIndex?.let { pdfTiles.prefetch(notebookId, it, loaded.widthMm, loaded.heightMm) }
+        for (n in listOfNotNull(previous, next)) {
+            n.pdfPageIndex?.let { pdfTiles.prefetch(notebookId, it, n.widthMm, n.heightMm) }
+        }
         loadAudioFor(meta)
+    }
+
+    /** The page at [k] for the sheet stack, from the cache or from disk; null when [k] is out of range. */
+    private suspend fun neighbourSheet(metas: List<PageMetaEntity>, k: Int): NotebookPage? {
+        if (k !in metas.indices) return null
+        val meta = metas[k]
+        neighbourCache[meta.pageId]?.let { return it.copy(index = k) }
+        val layers = try {
+            store.load(notebookId, meta.pageId)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        val page = meta.toPage(if (layers.isNullOrEmpty()) listOf(blankLayer(meta.pageId, 0)) else layers).copy(index = k)
+        neighbourCache[meta.pageId] = page
+        return page
+    }
+
+    /** Tells the view which sheet number this is and how many there are (for the n/N badges). */
+    private fun syncSheetInfo() {
+        view?.setSheetNumbers(_currentPageIndex.value + 1, _pages.value.size.coerceAtLeast(1))
     }
 
     private fun blankLayer(pageId: String, z: Int) = Layer(UUID.randomUUID().toString(), pageId, "Layer ${z + 1}", z)
 
-    private fun publish(page: NotebookPage) {
+    private fun publish(
+        page: NotebookPage,
+        previous: NotebookPage? = _pageSync.value?.previous,
+        next: NotebookPage? = _pageSync.value?.next
+    ) {
         revision++
-        _pageSync.value = PageSnapshot(page, revision)
+        _pageSync.value = PageSnapshot(page, revision, previous, next)
         syncActiveLayerToView()
     }
 
@@ -397,12 +468,19 @@ class WorkspaceViewModel(
             it.onClosed = { _ -> _instrument.value = GeometryInstrument.NONE; applyInstrument() }
             view.instruments = it
         }
-        view.onViewportChanged = { v -> publishViewport(v); checkPageEdge(v) }
+        view.onViewportChanged = { v -> publishViewport(v) }
         view.onSelectionChanged = { refreshSelection() }
-        view.onTouchReleased = { commitEdgePull() }
+        view.onRequestPage = { delta -> jumpToPage(_currentPageIndex.value + delta) }
+        view.pinTapHandler = ::onPinTap
+        view.setPlayingClip(playingClipId.value)
+        view.onPullToAddPage = { addPageAtEnd() }
 
         view.pdfTiles = pdfTiles
-        view.audioOffsetProvider = { if (recorder.isRecording) recorder.currentAudioOffsetMs() else null }
+        // Stroke-synced replay belongs to the page's first recording; later voice notes don't re-stamp the strokes.
+        view.audioOffsetProvider = {
+            val firstOnPage = _pages.value.getOrNull(_currentPageIndex.value)?.audioFilePath == null || recordingIsFirstOnPage
+            if (recorder.isRecording && firstOnPage) recorder.currentAudioOffsetMs() else null
+        }
         view.gestureListener = ::onGesture
         if (_audioTapSeek.value) installTapSeek(view)
         view.setAudioPlaybackMs(if (_replayVisible.value) player.playbackPositionMs.value else null)
@@ -417,7 +495,11 @@ class WorkspaceViewModel(
                 }
             }
         }
-        pageSync.value?.let { view.setPage(it.page, index) }
+        pageSync.value?.let {
+            view.setPage(it.page, index)
+            view.setNeighbours(it.previous, it.next)
+        }
+        syncSheetInfo()
         syncActiveLayerToView()
         applyToolToView()
     }
@@ -437,7 +519,9 @@ class WorkspaceViewModel(
             it.audioOffsetProvider = null
             it.onViewportChanged = null
             it.onSelectionChanged = null
-            it.onTouchReleased = null
+            it.onRequestPage = null
+            it.pinTapHandler = null
+            it.onPullToAddPage = null
         }
         view = null
         eraser = null
@@ -476,6 +560,9 @@ class WorkspaceViewModel(
         v.eraserBrush = _eraserConfig.value
         v.smartInversion = p.darkModeInkInversion
         v.holdToSnapHook = if (p.holdToSnapEnabled) snapHook else null
+        v.fingerTapShortcutsEnabled = p.fingerTapShortcutsEnabled
+        v.zoomLocked = _zoomLocked.value
+        _notebook.value?.let { v.canvasMode = it.canvasMode }
         v.singleFingerPanEnabled = p.singleFingerPanEnabled || t == WorkspaceTool.HAND_PAN || _readMode.value
         v.fillMode = t == WorkspaceTool.FILL_BUCKET
         fillBucket?.fill = _fillConfig.value
@@ -535,47 +622,17 @@ class WorkspaceViewModel(
         applyToolToView()
     }
 
-    /** Edge overscroll: when the page has been dragged well past its top or bottom, offer the neighbouring page. */
-    private fun checkPageEdge(v: ViewportTransform) {
-        val page = _pageSync.value?.page
-        val iv = this.view
-        if (page == null || iv == null || iv.height == 0 || (!_readMode.value && _tool.value != WorkspaceTool.HAND_PAN)) {
-            if (_edgePull.value != 0) _edgePull.value = 0
-            return
+    /** Pulled the stack up past the last sheet and let go: append a page of the same kind and show it. */
+    fun addPageAtEnd() {
+        val last = _pages.value.lastIndex
+        if (last < 0 || _currentPageIndex.value != last) return
+        val template = _pageSync.value?.page?.template ?: notebookDefaultTemplate()
+        viewModelScope.launch {
+            pageOpMutex.withLock {
+                flushCurrentPage()
+                addPageInternal(_pages.value.lastIndex, template, source = null)
+            }
         }
-        val out = FloatArray(2)
-        v.pageToScreen(0f, 0f, out)
-        val top = out[1]
-        v.pageToScreen(0f, page.heightMm, out)
-        val bottom = out[1]
-        val threshold = 90f * (iv.resources.displayMetrics.density)
-        val pull = when {
-            top > threshold && _currentPageIndex.value > 0 -> -1
-            bottom < iv.height - threshold && _currentPageIndex.value < _pages.value.lastIndex -> 1
-            else -> 0
-        }
-        if (pull != _edgePull.value) _edgePull.value = pull
-    }
-
-    /** Called when the finger lifts: commits a pending edge pull as a page turn. */
-    fun commitEdgePull() {
-        val pull = _edgePull.value
-        if (pull == 0) return
-        _edgePull.value = 0
-        val target = _currentPageIndex.value + pull
-        jumpToPage(target)
-        if (pull > 0) scrollToTopOnNextShow = true else scrollToBottomOnNextShow = true
-    }
-
-    private var scrollToTopOnNextShow = false
-    private var scrollToBottomOnNextShow = false
-
-    /** After an edge-pull page turn: +1 = start at the top of the new page, -1 = start at its bottom, 0 = keep the offset. */
-    fun consumeEdgeScroll(): Int {
-        val r = if (scrollToTopOnNextShow) 1 else if (scrollToBottomOnNextShow) -1 else 0
-        scrollToTopOnNextShow = false
-        scrollToBottomOnNextShow = false
-        return r
     }
 
     fun nextPage() = jumpToPage(_currentPageIndex.value + 1)
@@ -694,7 +751,8 @@ class WorkspaceViewModel(
     private fun onPageContentChanged(page: NotebookPage) {
         val current = _pageSync.value?.page
         if (current != null && current.id != page.id) return
-        _pageSync.value = PageSnapshot(page, revision)
+        val snap = _pageSync.value
+        _pageSync.value = PageSnapshot(page, revision, snap?.previous, snap?.next)
         markModified(page)
     }
 
@@ -894,7 +952,8 @@ class WorkspaceViewModel(
             shapes = layer.shapes.map { it.copy(id = UUID.randomUUID().toString(), layerId = newLayerId) },
             stencils = layer.stencils.map { it.copy(id = UUID.randomUUID().toString(), layerId = newLayerId) },
             images = layer.images.map { it.copy(id = UUID.randomUUID().toString(), layerId = newLayerId) },
-            textBoxes = layer.textBoxes.map { it.copy(id = UUID.randomUUID().toString(), layerId = newLayerId) }
+            textBoxes = layer.textBoxes.map { it.copy(id = UUID.randomUUID().toString(), layerId = newLayerId) },
+            audioClips = layer.audioClips.map { it.copy(id = UUID.randomUUID().toString(), layerId = newLayerId) }
         )
     }
 
@@ -989,14 +1048,34 @@ class WorkspaceViewModel(
 
     fun resetView() {
         val v = view ?: return
-        v.setViewport(v.viewport.copy(zoom = 1f, rotationDeg = 0f, translationX = 0f, translationY = 0f))
+        // "Reset": true 100% zoom, unrotated, top of the current sheet (or the nearest allowed zoom on a small view).
+        val margin = 12f * context.resources.displayMetrics.density
+        v.setViewport(
+            v.viewport.copy(
+                zoom = maxOf(1f, v.minZoom()),
+                rotationDeg = 0f,
+                translationX = 0f,
+                translationY = margin
+            )
+        )
+        v.settleViewport()
         publishViewport(v.viewport)
+    }
+
+    fun toggleZoomLock() {
+        _zoomLocked.value = !_zoomLocked.value
+        view?.zoomLocked = _zoomLocked.value
+    }
+
+    /** Zoom dropdown: 25..1000 percent, about the view centre. */
+    fun setZoomPercent(percent: Int) {
+        view?.zoomTo(percent / 100f)
+        view?.let { publishViewport(it.viewport) }
     }
 
     fun fitToWidth() {
         val v = view ?: return
-        val p = _pageSync.value?.page ?: return
-        v.setViewport(v.viewport.fitToWidth(v.width.toFloat(), p.widthMm))
+        v.setViewport(v.fitViewport())
         publishViewport(v.viewport)
     }
 
@@ -1208,6 +1287,8 @@ class WorkspaceViewModel(
     // =====================================================================================
 
     private fun loadAudioFor(meta: PageMetaEntity) {
+        loadedClipId = null
+        _activeClipId.value = null
         val f = meta.audioFilePath?.let(::File)
         if (f != null && f.isFile) player.load(f) else player.unload()
     }
@@ -1217,7 +1298,13 @@ class WorkspaceViewModel(
         val p = _pageSync.value?.page ?: return
         if (recorder.state.value.status == RecorderStatus.IDLE) {
             player.unload()
-            if (!recorder.start(notebookId, p.id)) {
+            loadedClipId = null
+            _activeClipId.value = null
+            val clipId = UUID.randomUUID().toString()
+            recordingClipId = clipId
+            recordingIsFirstOnPage = _pages.value.firstOrNull { it.pageId == p.id }?.audioFilePath == null
+            if (!recorder.start(notebookId, p.id, clipId)) {
+                recordingClipId = null
                 _events.tryEmit(WorkspaceEvent.Message(recorder.state.value.error ?: "Couldn't start recording."))
             }
         } else {
@@ -1232,19 +1319,139 @@ class WorkspaceViewModel(
     private fun stopRecordingIfActive() {
         if (recorder.state.value.status == RecorderStatus.IDLE) return
         val pageId = recorder.state.value.pageId
+        val elapsedMs = recorder.state.value.elapsedMs
+        val clipId = recordingClipId
+        recordingClipId = null
         val file = recorder.stop() ?: return
-        if (pageId == null) return
-        // Update the in-memory page list first so the bar switches to Replay at once, then persist.
+        if (pageId == null || clipId == null) return
         val path = file.absolutePath
-        _pages.value = _pages.value.map { if (it.pageId == pageId) it.copy(audioFilePath = path) else it }
-        if (_pageSync.value?.page?.id == pageId) player.load(file)
-        viewModelScope.launch {
-            pageDao.setAudioFile(pageId, path, System.currentTimeMillis())
-            _pages.value = pageDao.getPages(notebookId)
+
+        // The recording becomes a voice-note pin on the page it was made on.
+        val p = _pageSync.value?.page
+        if (p != null && p.id == pageId) {
+            val layer = p.layerById(_activeLayerId.value)?.takeIf { it.isEditable }
+                ?: p.layers.firstOrNull { it.isEditable }
+                ?: p.layers.firstOrNull()
+            if (layer != null) {
+                val n = p.layers.sumOf { it.audioClips.size }
+                val pin = AudioClipElement(
+                    id = clipId,
+                    layerId = layer.id,
+                    positionMm = defaultPinPosition(p, n),
+                    audioFilePath = "audio/$notebookId/${pageId}_$clipId.m4a",
+                    durationMs = elapsedMs.coerceAtLeast(0L),
+                    title = "Voice Note ${n + 1}"
+                )
+                if (exec(AddElement(pin))) _selectedClipId.value = clipId
+            }
+        }
+
+        // The first recording on a page also drives stroke-synced replay (its strokes were time-stamped).
+        if (recordingIsFirstOnPage) {
+            _pages.value = _pages.value.map { if (it.pageId == pageId) it.copy(audioFilePath = path) else it }
+            if (_pageSync.value?.page?.id == pageId) player.load(file)
+            viewModelScope.launch {
+                pageDao.setAudioFile(pageId, path, System.currentTimeMillis())
+                _pages.value = pageDao.getPages(notebookId)
+            }
         }
     }
 
-    fun playAudio() = player.play()
+    private var recordingIsFirstOnPage = false
+
+    /** New pins stack down the page margin until the user pins them to a spot. */
+    private fun defaultPinPosition(page: NotebookPage, existing: Int): PointMm {
+        val x = (page.widthMm - AudioClipElement.PIN_WIDTH_MM - 8f).coerceAtLeast(2f)
+        return PointMm(x, 8f + existing * (AudioClipElement.PIN_HEIGHT_MM + 2f))
+    }
+
+    private fun clipById(id: String): AudioClipElement? = audioClips.value.firstOrNull { it.id == id }
+
+    /** Plays or pauses a voice note; tapping another pin switches to it. */
+    fun toggleAudioClip(clipId: String) {
+        val clip = clipById(clipId) ?: return
+        if (recorder.state.value.status != RecorderStatus.IDLE) {
+            _events.tryEmit(WorkspaceEvent.Message("Stop recording first."))
+            return
+        }
+        _selectedClipId.value = clipId
+        if (_activeClipId.value == clipId && player.isPlaying.value) {
+            player.pause()
+            return
+        }
+        if (loadedClipId != clipId) {
+            val f = File(context.filesDir, clip.audioFilePath)
+            if (!f.isFile || !player.load(f)) {
+                _events.tryEmit(WorkspaceEvent.Message("That recording's audio file is missing."))
+                return
+            }
+            loadedClipId = clipId
+            if (clip.startOffsetMs > 0L) player.seekTo(clip.startOffsetMs)
+        }
+        _activeClipId.value = clipId
+        player.play()
+    }
+
+    fun selectAudioClip(clipId: String?) {
+        _selectedClipId.value = clipId
+    }
+
+    /** Removes a voice-note pin (undoable; the audio file is kept so Undo can bring it back). */
+    fun deleteAudioClip(clipId: String) {
+        if (_activeClipId.value == clipId) {
+            player.pause()
+            _activeClipId.value = null
+        }
+        if (exec(RemoveElements(listOf(clipId))) && _selectedClipId.value == clipId) _selectedClipId.value = null
+    }
+
+    /** Turns "Pin to Spot on Note" on or off. */
+    fun setPinPlacement(active: Boolean) {
+        _pinPlacement.value = active && audioClips.value.isNotEmpty()
+        if (active && audioClips.value.isEmpty()) {
+            _events.tryEmit(WorkspaceEvent.Message("Record a voice note first, then pin it."))
+        }
+    }
+
+    /** The pin handler the ink view calls for taps and pen-downs: placement mode, else play / pause a tapped pin. */
+    private fun onPinTap(xMm: Float, yMm: Float): Boolean {
+        if (_pinPlacement.value) {
+            val id = _selectedClipId.value ?: audioClips.value.lastOrNull()?.id
+            val clip = id?.let(::clipById)
+            _pinPlacement.value = false
+            if (clip == null) return true
+            val page = _pageSync.value?.page ?: return true
+            val w = AudioClipElement.PIN_WIDTH_MM
+            val h = AudioClipElement.PIN_HEIGHT_MM
+            var cx = xMm
+            var cy = yMm
+            if (_notebook.value?.canvasMode != com.omninote.pro.core.model.CanvasMode.INFINITE) {
+                cx = cx.coerceIn(w / 2f, (page.widthMm - w / 2f).coerceAtLeast(w / 2f))
+                cy = cy.coerceIn(h / 2f, (page.heightMm - h / 2f).coerceAtLeast(h / 2f))
+            }
+            val b = clip.spatialBounds
+            if (exec(TransformElements(setOf(clip.id), AffineTransform2D.translation(cx - b.centerX, cy - b.centerY)))) {
+                _selectedClipId.value = clip.id
+                _events.tryEmit(WorkspaceEvent.Message("Pinned \"${clip.title}\"."))
+            }
+            return true
+        }
+        val hit = audioClips.value.lastOrNull { c ->
+            val b = c.spatialBounds
+            xMm >= b.left && xMm <= b.right && yMm >= b.top && yMm <= b.bottom
+        } ?: return false
+        toggleAudioClip(hit.id)
+        return true
+    }
+
+    fun playAudio() {
+        if (loadedClipId != null) {
+            // A voice-note pin was playing: bring the page's stroke-synced recording back first.
+            _activeClipId.value = null
+            _pages.value.getOrNull(_currentPageIndex.value)?.let(::loadAudioFor)
+        }
+        player.play()
+    }
     fun pauseAudio() = player.pause()
     fun seekAudio(ms: Long) = player.seekTo(ms)
     fun setAudioSpeed(speed: Float) = player.setSpeed(speed)
@@ -1352,6 +1559,33 @@ class WorkspaceViewModel(
      * Imports a picture from the gallery or a drag-and-drop: downscales it to at most 2048 px, stores it under
      * `filesDir/images/{notebookId}/{imageId}.png`, places it at [atMm] (or the view centre) on the active layer and selects it.
      */
+    /** Drops a text box with [text] at the centre of what is on screen and selects it. */
+    fun addTextBox(text: String) {
+        val body = text.trim()
+        if (body.isEmpty()) return
+        val p = _pageSync.value?.page ?: return
+        val layer = p.layerById(_activeLayerId.value)
+        if (layer == null || !layer.isEditable) {
+            _events.tryEmit(WorkspaceEvent.LockedLayerRejected(_activeLayerId.value, layer?.name))
+            return
+        }
+        val centre = viewCenterPage() ?: PointMm(p.widthMm / 2f, p.heightMm / 2f)
+        val fontPt = 14f
+        val lineMm = fontPt * 0.3528f * 1.45f
+        val lines = body.split('\n').sumOf { maxOf(1, kotlin.math.ceil(it.length / 28.0).toInt()) }
+        val w = 70f
+        val h = lines * lineMm + 4f
+        val element = com.omninote.pro.core.model.TextBoxElement(
+            id = UUID.randomUUID().toString(),
+            layerId = layer.id,
+            bounds = StrokeBounds(centre.x - w / 2f, centre.y - h / 2f, centre.x + w / 2f, centre.y + h / 2f),
+            markdownText = body,
+            fontSizePt = fontPt,
+            semanticColorArgb = brush.value.colorArgb
+        )
+        if (exec(com.omninote.pro.data.AddElement(element))) focusNewElements(setOf(element.id))
+    }
+
     fun importImage(uri: Uri, atMm: PointMm? = null) {
         val first = _pageSync.value?.page ?: return
         val layer0 = first.layerById(_activeLayerId.value)

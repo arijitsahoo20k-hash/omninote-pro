@@ -137,6 +137,7 @@ class MainActivity : ComponentActivity() {
         val g = graph
         var route by remember { mutableStateOf<Route>(Route.Library) }
         var showSettings by remember { mutableStateOf(false) }
+        var launching by remember { androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) } }
 
         // An external file was opened: make sure the library (which shows import progress and opens the result) is visible.
         val request = showLibraryRequest
@@ -154,9 +155,9 @@ class MainActivity : ComponentActivity() {
 
         MaterialTheme(
             colorScheme = darkColorScheme(
-                background = Color(0xFF14110F),
-                surface = Color(0xFF14110F),
-                primary = Color(0xFFD9845B)
+                background = Color(0xFF11192B),
+                surface = Color(0xFF11192B),
+                primary = Color(0xFF3B82F6)
             )
         ) {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -188,6 +189,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                    if (launching) com.omninote.pro.ui.BrandLaunch(onFinished = { launching = false })
                 }
             }
         }

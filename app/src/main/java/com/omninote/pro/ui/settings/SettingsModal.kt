@@ -131,7 +131,7 @@ fun SettingsModal(
 @Composable
 private fun Card(title: String, content: @Composable () -> Unit) {
     Column(
-        Modifier.fillMaxWidth().background(Color(0x1AFFF1DC), RoundedCornerShape(18.dp)).padding(14.dp),
+        Modifier.fillMaxWidth().background(Color(0x1ACBD5E1), RoundedCornerShape(18.dp)).padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         SectionLabel(title)
@@ -234,6 +234,7 @@ private fun DefaultsSection(prefs: UserPreferencesStore) {
     Card("Writing defaults") {
         LabeledSwitch("Smart ink inversion on dark paper", s.darkModeInkInversion, prefs::setDarkModeInkInversion)
         LabeledSwitch("Hold at stroke end to snap to a shape (320 ms)", s.holdToSnapEnabled, prefs::setHoldToSnap)
+        LabeledSwitch("Finger tap shortcuts (2-finger undo, 3-finger redo, double-tap fit)", s.fingerTapShortcutsEnabled, prefs::setFingerTapShortcuts)
         LabeledSwitch(
             if (s.singleFingerPanEnabled) "One finger pans (stylus only draws)" else "Strict palm rejection (two fingers pan)",
             s.singleFingerPanEnabled, prefs::setSingleFingerPan

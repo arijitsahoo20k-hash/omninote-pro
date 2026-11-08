@@ -51,6 +51,7 @@ class DryLayerRenderer(
     private val itemBounds = RectF()
     private var pageBounds = StrokeBounds(0f, 0f, 1f, 1f)
     private val templates = ProceduralTemplateRenderer()
+    private val pins = AudioPinPainter()
     private var playbackMs: Long = -1L
 
     /**
@@ -65,17 +66,41 @@ class DryLayerRenderer(
     fun render(
         canvas: Canvas,
         page: NotebookPage,
-        index: SpatialRTreeIndex,
+        index: SpatialRTreeIndex?,
         viewportMm: StrokeBounds,
         ctx: InkRenderContext,
         excludeIds: Set<String> = emptySet(),
         activeAudioPlaybackMs: Long? = null,
         pxPerMm: Float = 0f,
-        zoom: Float = 1f
+        zoom: Float = 1f,
+        isInfiniteCanvas: Boolean = false
     ) {
         ctx.paperIsDark = page.template.paperColor.isDark
         playbackMs = activeAudioPlaybackMs ?: -1L
-        paintPaper(canvas, page, viewportMm, pxPerMm)
+        // A sheet of paper has an edge: nothing (paper, template, PDF or ink) may bleed outside it.
+        if (!isInfiniteCanvas) {
+            canvas.save()
+            canvas.clipRect(0f, 0f, page.widthMm, page.heightMm)
+        }
+        try {
+            renderContent(canvas, page, index, viewportMm, ctx, excludeIds, pxPerMm, zoom, isInfiniteCanvas)
+        } finally {
+            if (!isInfiniteCanvas) canvas.restore()
+        }
+    }
+
+    private fun renderContent(
+        canvas: Canvas,
+        page: NotebookPage,
+        index: SpatialRTreeIndex?,
+        viewportMm: StrokeBounds,
+        ctx: InkRenderContext,
+        excludeIds: Set<String>,
+        pxPerMm: Float,
+        zoom: Float,
+        isInfiniteCanvas: Boolean
+    ) {
+        paintPaper(canvas, page, viewportMm, pxPerMm, isInfiniteCanvas)
         if (page.pdfPageIndex != null) pdf?.draw(canvas, page, viewportMm, pxPerMm, zoom)
         background?.draw(canvas, page, viewportMm, ctx)
 
@@ -84,7 +109,12 @@ class DryLayerRenderer(
         val visibleIds = HashSet<String>(layers.size * 2)
         for (l in layers) visibleIds.add(l.id)
         val inView = HashSet<String>()
-        for (ref in index.queryViewport(viewportMm, visibleIds)) inView.add(ref.id)
+        if (index != null) {
+            for (ref in index.queryViewport(viewportMm, visibleIds)) inView.add(ref.id)
+        } else {
+            // Neighbour sheets are drawn without an R-Tree: everything on the page is a candidate.
+            for (l in layers) for (e in l.allElements()) inView.add(e.id)
+        }
         if (excludeIds.isNotEmpty()) inView.removeAll(excludeIds)
 
         // Background-locked images from every layer sit under all ink, regardless of layer order.
@@ -111,7 +141,7 @@ class DryLayerRenderer(
         playbackMs = -1L
         val full = StrokeBounds(0f, 0f, page.widthMm, page.heightMm)
         val region = regionMm?.let {
-            StrokeBounds(
+            if (options.allowRegionOutsidePage) it else StrokeBounds(
                 max(0f, it.left), max(0f, it.top), min(full.right, it.right), min(full.bottom, it.bottom)
             )
         } ?: full
@@ -128,10 +158,11 @@ class DryLayerRenderer(
                     full,
                     region,
                     0f,
-                    PRINT_RULE_RGB
+                    PRINT_RULE_RGB,
+                    options.infiniteCanvas
                 )
             } else {
-                templates.draw(canvas, page.template, full, region, 0f)
+                templates.draw(canvas, page.template, full, region, 0f, null, options.infiniteCanvas)
             }
         }
         options.underlay?.invoke(canvas, region)
@@ -154,6 +185,7 @@ class DryLayerRenderer(
             for (shape in layer.shapes) if (wanted(shape)) shapes.draw(canvas, shape, ctx)
             for (st in layer.stencils) if (wanted(st)) stencils.draw(canvas, st, ctx)
             for (box in layer.textBoxes) if (wanted(box)) texts.draw(canvas, box, ctx)
+            for (clip in layer.audioClips) if (wanted(clip)) pins.draw(canvas, clip, ctx)
             for (s in layer.strokes) {
                 val type = s.brush.type
                 if (type != BrushType.HIGHLIGHTER && type != BrushType.STUDY_TAPE && wanted(s)) strokes.drawStroke(canvas, s, ctx)
@@ -183,16 +215,65 @@ class DryLayerRenderer(
         haloPaint.style = Paint.Style.FILL
     }
 
-    private fun paintPaper(canvas: Canvas, page: NotebookPage, viewportMm: StrokeBounds, pxPerMm: Float) {
-        // Fill the whole viewport first so the area outside the page edge matches the paper, then lay the
-        // procedural template over the visible part of the page.
+    private fun paintPaper(canvas: Canvas, page: NotebookPage, viewportMm: StrokeBounds, pxPerMm: Float, infinite: Boolean) {
         paperPaint.style = Paint.Style.FILL
         paperPaint.color = page.template.paperColor.argb or (0xFF shl 24)
-        canvas.drawRect(viewportMm.left, viewportMm.top, viewportMm.right, viewportMm.bottom, paperPaint)
         if (pageBounds.right != page.widthMm || pageBounds.bottom != page.heightMm) {
             pageBounds = StrokeBounds(0f, 0f, page.widthMm, page.heightMm)
         }
-        templates.draw(canvas, page.template, pageBounds, viewportMm, pxPerMm)
+        if (infinite) {
+            // No edge: the paper and the lattice cover everything the viewport shows.
+            canvas.drawRect(viewportMm.left, viewportMm.top, viewportMm.right, viewportMm.bottom, paperPaint)
+        } else {
+            val l = max(0f, viewportMm.left)
+            val t = max(0f, viewportMm.top)
+            val r = min(page.widthMm, viewportMm.right)
+            val b = min(page.heightMm, viewportMm.bottom)
+            if (l >= r || t >= b) return
+            canvas.drawRect(l, t, r, b, paperPaint)
+        }
+        templates.draw(canvas, page.template, pageBounds, viewportMm, pxPerMm, null, infinite)
+    }
+
+    private val chromePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val badgeRect = RectF()
+    private val badgeText = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+
+    /**
+     * Soft drop shadow and crisp border of a paper sheet sitting on the workspace desk. Call before clipping to the
+     * page, with the canvas in that page's mm space.
+     */
+    fun drawSheetChrome(canvas: Canvas, page: NotebookPage, pxPerMm: Float, deskIsDark: Boolean) {
+        val ppm = if (pxPerMm > 0f) pxPerMm else 1f
+        chromePaint.style = Paint.Style.FILL
+        for (i in 7 downTo 1) {
+            val grow = i * 2.4f / ppm
+            val dy = 3.2f / ppm
+            chromePaint.color = ((if (deskIsDark) 20 else 14) + (8 - i) * 2).coerceAtMost(255).shl(24)
+            badgeRect.set(-grow, -grow + dy, page.widthMm + grow, page.heightMm + grow + dy)
+            canvas.drawRoundRect(badgeRect, grow, grow, chromePaint)
+        }
+        chromePaint.style = Paint.Style.STROKE
+        chromePaint.strokeWidth = 1.2f / ppm
+        chromePaint.color = if (deskIsDark) 0x66FFFFFF else 0x55000000
+        canvas.drawRect(0f, 0f, page.widthMm, page.heightMm, chromePaint)
+        chromePaint.style = Paint.Style.FILL
+    }
+
+    /** The small "2 / 3" pill at the bottom centre of a sheet. */
+    fun drawSheetBadge(canvas: Canvas, page: NotebookPage, label: String, pxPerMm: Float) {
+        val ppm = if (pxPerMm > 0f) pxPerMm else 1f
+        val w = 54f / ppm
+        val h = 20f / ppm
+        val cx = page.widthMm / 2f
+        val bottom = page.heightMm - 12f / ppm
+        badgeRect.set(cx - w / 2f, bottom - h, cx + w / 2f, bottom)
+        chromePaint.style = Paint.Style.FILL
+        chromePaint.color = 0x55808080
+        canvas.drawRoundRect(badgeRect, h / 2f, h / 2f, chromePaint)
+        badgeText.textSize = 12f / ppm
+        badgeText.color = 0xFF5F6673.toInt()
+        canvas.drawText(label, cx, bottom - h / 2f + 4.2f / ppm, badgeText)
     }
 
     /** Draws one audio-stamped item per the replay rules; unstamped items or no active replay draw normally. */
@@ -250,6 +331,7 @@ class DryLayerRenderer(
         for (shape in layer.shapes) if (shape.id in inView) drawShapeAudio(canvas, shape, ctx)
         for (st in layer.stencils) if (st.id in inView) stencils.draw(canvas, st, ctx)
         for (box in layer.textBoxes) if (box.id in inView) texts.draw(canvas, box, ctx)
+        for (clip in layer.audioClips) if (clip.id in inView) pins.draw(canvas, clip, ctx)
         for (s in layer.strokes) {
             val type = s.brush.type
             if (type != BrushType.HIGHLIGHTER && type != BrushType.STUDY_TAPE && s.id in inView) {

@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.omninote.pro.data.AcademicPalettes
@@ -74,7 +75,12 @@ fun LassoContextBar(
     vm: WorkspaceViewModel,
     anchor: Rect,
     container: IntSize,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * The part of [container] that is free canvas: not under the top chrome, the tool strip or the audio bar. The bar
+     * stays inside it and, when "above the selection" would run into the top chrome, drops below the selection.
+     */
+    safeCanvasRectPx: Rect? = null
 ) {
     var panel by remember { mutableStateOf(BarPanel.NONE) }
     var barSize by remember { mutableStateOf(IntSize.Zero) }
@@ -82,9 +88,19 @@ fun LassoContextBar(
     val gapPx = 14f
     val margin = 8f
 
-    val x = (anchor.center.x - barSize.width / 2f).coerceIn(margin, maxOf(margin, container.width - barSize.width - margin))
+    val safe = safeCanvasRectPx ?: Rect(0f, 0f, container.width.toFloat(), container.height.toFloat())
+    val minX = safe.left + margin
+    val maxX = maxOf(minX, safe.right - barSize.width - margin)
+    val minY = safe.top + margin
+    val maxY = maxOf(minY, safe.bottom - barSize.height - margin)
+    val x = (anchor.center.x - barSize.width / 2f).coerceIn(minX, maxX)
     val above = anchor.top - barSize.height - gapPx
-    val y = if (above >= margin) above else (anchor.bottom + gapPx).coerceAtMost(maxOf(margin, container.height - barSize.height - margin))
+    val below = anchor.bottom + gapPx
+    val y = when {
+        above >= minY -> above                // room above the selection, clear of the top chrome / dock
+        below <= maxY -> below                // otherwise just under it
+        else -> minY                          // selection fills the canvas: float at the top of the free area
+    }
 
     val svgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/svg+xml")) { uri ->
         if (uri != null) vm.exportSelectionSvg(uri)
@@ -95,6 +111,7 @@ fun LassoContextBar(
 
     Column(
         modifier
+            .zIndex(30f)
             .offset { IntOffset(x.roundToInt(), y.roundToInt()) }
             .onSizeChanged { barSize = it },
         horizontalAlignment = Alignment.CenterHorizontally

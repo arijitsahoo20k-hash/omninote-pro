@@ -6,6 +6,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.animation.ValueAnimator
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -14,6 +17,7 @@ import android.view.View
 import androidx.input.motionprediction.MotionEventPredictor
 import com.omninote.pro.core.model.BrushConfig
 import com.omninote.pro.core.model.BrushType
+import com.omninote.pro.core.model.CanvasMode
 import com.omninote.pro.core.model.NotebookPage
 import com.omninote.pro.core.model.PointMm
 import com.omninote.pro.core.model.SpatialItemKind
@@ -110,14 +114,101 @@ class FrontBufferedInkView(
      */
     var tapInterceptor: ((Float, Float) -> Boolean)? = null
 
+    /**
+     * Voice-note pins. Called with a page-space point (mm) on a finger tap and when the pen lands; return true when
+     * the point belongs to a pin (or the host is placing one) so the touch is consumed instead of starting a stroke.
+     */
+    var pinTapHandler: ((Float, Float) -> Boolean)? = null
+
+    /** The pin that is playing right now is drawn glowing. */
+    fun setPlayingClip(clipId: String?) {
+        if (dryCtx.playingAudioClipId == clipId) return
+        dryCtx.playingAudioClipId = clipId
+        requestDry()
+    }
+
     /** Fired on the main thread whenever pan, zoom or rotation changes (gesture, fit, reset). Replaces host polling. */
     var onViewportChanged: ((ViewportTransform) -> Unit)? = null
 
     /** Fired whenever the Lasso selection or its frame changes (see [LassoController.onSelectionChanged]). */
     var onSelectionChanged: (() -> Unit)? = null
 
-    /** Fired when the last pointer lifts (or the gesture is cancelled); the host uses it to turn a pulled page. */
+    /** Fired when the last pointer lifts (or the gesture is cancelled). */
     var onTouchReleased: (() -> Unit)? = null
+
+    /**
+     * PAGINATED and PDF notebooks show a vertical stack of sheets on a desk; INFINITE has no sheet edge at all.
+     * (PDF pages are paginated pages whose paper is the PDF.)
+     */
+    var canvasMode: CanvasMode = CanvasMode.PAGINATED
+        set(value) {
+            if (field == value) return
+            field = value
+            requestDry()
+            invalidate()
+        }
+
+    /** Workspace desk colour behind the sheets (midnight navy by default). */
+    var deskColorArgb: Int = DEFAULT_DESK_ARGB
+        set(value) {
+            if (field == value) return
+            field = value
+            requestDry()
+            invalidate()
+        }
+
+    /**
+     * True when the last [setPage] swapped in a neighbouring sheet and shifted the viewport to match, so the host must
+     * not re-fit or re-position it.
+     */
+    var stackKeptOnLastSetPage: Boolean = false
+        private set
+
+    /** The sheet before / after the current one, drawn above / below it in the stack. Null = first / last page. */
+    private var previousSheet: NotebookPage? = null
+    private var nextSheet: NotebookPage? = null
+    private var sheetNumber = 1
+    private var sheetCount = 1
+
+    fun setNeighbours(previous: NotebookPage?, next: NotebookPage?) {
+        previousSheet = previous
+        nextSheet = next
+        requestDry()
+        // The set of reachable sheets changed, so the scroll limits did too.
+        setViewport(constrained(viewport, 1f, 0f))
+    }
+
+    /** 1-based number of the current sheet and the page count, for the "n/N" badges. */
+    fun setSheetNumbers(current: Int, total: Int) {
+        if (current == sheetNumber && total == sheetCount) return
+        sheetNumber = current
+        sheetCount = total
+        requestDry()
+    }
+
+    /** "Lock Zoom": pinch and rotate are ignored, one- and two-finger panning still works. */
+    var zoomLocked: Boolean = false
+
+    /** Zooms about the view centre to [zoom] (clamped to the allowed range) and keeps the stack on the desk. */
+    fun zoomTo(zoom: Float) {
+        if (width <= 0 || height <= 0) return
+        val target = zoom.coerceIn(minZoom(), ViewportTransform.MAX_ZOOM)
+        val factor = target / viewport.zoom
+        val moved = viewport.applyGesture(
+            GestureCommand.Transform(width / 2f, height / 2f, factor, 0f, 0f, 0f),
+            minZoom()
+        )
+        setViewport(constrained(moved, 1f, 0f))
+    }
+
+    /** Re-applies the scroll limits (after a reset or a fit). */
+    fun settleViewport() = setViewport(constrained(viewport, 1f, 0f))
+
+    /** The viewport centre crossed into the neighbouring sheet: +1 = next, -1 = previous. The host swaps the page. */
+    var onRequestPage: ((Int) -> Unit)? = null
+
+    /** The stack was pulled past the last sheet and released: the host appends a page. */
+    var onPullToAddPage: (() -> Unit)? = null
 
     /** Highlights the whole canvas as a drop target while an image is dragged over it. */
     var dropHighlight: Boolean = false
@@ -177,6 +268,11 @@ class FrontBufferedInkView(
      * Audio replay position. Non-null switches the dry layer into replay mode (ghost / glow / full by stamp);
      * set it from the player's 60Hz ticker, and back to null to leave replay mode.
      */
+    /** Mirrors the Settings toggle; see [PalmRejectionArbitrator.fingerTapShortcutsEnabled]. */
+    var fingerTapShortcutsEnabled: Boolean
+        get() = arbitrator.fingerTapShortcutsEnabled
+        set(value) { arbitrator.fingerTapShortcutsEnabled = value }
+
     /** One finger pans the page (Hand tool or the "single finger pan" setting). Off = strict palm rejection. */
     var singleFingerPanEnabled: Boolean
         get() = arbitrator.singleFingerPanEnabled
@@ -287,6 +383,17 @@ class FrontBufferedInkView(
         invalidate()
     }
 
+    private var switchPending = false
+    private val clearSwitchPending = Runnable { switchPending = false }
+    private var settleAnimator: ValueAnimator? = null
+    private val gestureEndRunnable = Runnable {
+        pdfTiles?.gestureActive = false
+        requestDry()
+    }
+    private val pullPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pullRect = RectF()
+    private val isPaged: Boolean get() = canvasMode != CanvasMode.INFINITE
+
     private var wetPredicted: PointArrays? = null
     private var gestureJob: kotlinx.coroutines.Job? = null
     private val dropPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
@@ -312,6 +419,11 @@ class FrontBufferedInkView(
     override fun onDetachedFromWindow() {
         removeCallbacks(holdRunnable)
         removeCallbacks(settleRunnable)
+        removeCallbacks(gestureEndRunnable)
+        removeCallbacks(clearSwitchPending)
+        settleAnimator?.cancel()
+        settleAnimator = null
+        pdfTiles?.gestureActive = false
         gestureJob?.cancel()
         gestureJob = null
         mode = Mode.NONE
@@ -341,6 +453,7 @@ class FrontBufferedInkView(
         dryCanvas = null
         dryViewport = null
         requestDry()
+        if (w > 0 && h > 0) setViewport(constrained(viewport, 1f, 0f))
     }
 
     // =====================================================================================
@@ -349,7 +462,12 @@ class FrontBufferedInkView(
 
     /** Replaces the working page and its index (page switch, undo/redo, eraser edit, external sync). */
     fun setPage(newPage: NotebookPage, newIndex: SpatialRTreeIndex) {
-        if (page != null && page?.id != newPage.id) postSnap?.dismiss()
+        val old = page
+        stackKeptOnLastSetPage = false
+        if (old != null && old.id != newPage.id) {
+            postSnap?.dismiss()
+            keepStackStill(old, newPage)
+        }
         page = newPage
         index = newIndex
         lasso?.onPageReplaced(newPage)
@@ -357,6 +475,28 @@ class FrontBufferedInkView(
             activeLayerId = newPage.layers.minByOrNull { it.zIndex }?.id ?: ""
         }
         requestDry()
+    }
+
+    /**
+     * The stack scrolled onto a neighbouring sheet and it is now the working page. Its origin moves, so the viewport is
+     * shifted by exactly that much and nothing on screen jumps.
+     */
+    private fun keepStackStill(old: NotebookPage, newPage: NotebookPage) {
+        switchPending = false
+        removeCallbacks(clearSwitchPending)
+        if (!isPaged) return
+        val ox = (old.widthMm - newPage.widthMm) / 2f
+        val oy = when (newPage.id) {
+            nextSheet?.id -> old.heightMm + SHEET_GAP_MM
+            previousSheet?.id -> -(newPage.heightMm + SHEET_GAP_MM)
+            else -> return
+        }
+        stackKeptOnLastSetPage = true
+        viewport.pageToScreen(ox, oy, tmp)
+        val shifted = viewport.copy(translationX = tmp[0], translationY = tmp[1])
+        viewport = shifted
+        invalidate()
+        onViewportChanged?.invoke(shifted)
     }
 
     /** Adapter for [EraserController], [PostSnapEditController] and [FillBucketHandler]. Persist on [InkViewEvent.PageChanged]. */
@@ -391,6 +531,98 @@ class FrontBufferedInkView(
         viewport = newViewport
         invalidate()
         onViewportChanged?.invoke(newViewport)
+        checkCentreCrossing()
+    }
+
+    /** Smallest zoom: 0.6 x fit-to-width on sheets, the global minimum on the infinite canvas. */
+    fun minZoom(): Float {
+        val p = page ?: return ViewportTransform.MIN_ZOOM
+        if (!isPaged || width <= 0) return ViewportTransform.MIN_ZOOM
+        val inset = 2f * SHEET_MARGIN_DP * resources.displayMetrics.density
+        return ViewportTransform.pagedMinZoom(width - inset, p.widthMm, viewport.basePxPerMm)
+    }
+
+    /** The viewport that shows the whole sheet width (with a little desk either side) without touching the vertical offset. */
+    fun fitViewport(): ViewportTransform {
+        val p = page ?: return viewport
+        if (width <= 0) return viewport
+        val inset = if (isPaged) 2f * SHEET_MARGIN_DP * resources.displayMetrics.density else 0f
+        val fitted = viewport.fitToWidth(width - inset, p.widthMm).copy(translationX = inset / 2f)
+        return constrained(fitted, 1f, 0f)
+    }
+
+    /** Keeps the sheet stack on the desk (see [ViewportTransform.constrainToPageBounds]); a no-op on the infinite canvas. */
+    private fun constrained(v: ViewportTransform, smoothing: Float, overscrollPx: Float): ViewportTransform {
+        val p = page ?: return v
+        if (!isPaged || width <= 0 || height <= 0) return v
+        val d = resources.displayMetrics.density
+        return v.constrainToPageBounds(
+            viewWidthPx = width.toFloat(),
+            viewHeightPx = height.toFloat(),
+            pageWidthMm = p.widthMm,
+            pageHeightMm = p.heightMm,
+            hasPreviousSheet = previousSheet != null,
+            hasNextSheet = nextSheet != null,
+            marginPx = SHEET_MARGIN_DP * d,
+            overscrollBottomPx = overscrollPx,
+            smoothing = smoothing
+        )
+    }
+
+    /** When the viewport centre passes into the neighbouring sheet, ask the host to make that sheet the working page. */
+    private fun checkCentreCrossing() {
+        if (!isPaged || switchPending || mode != Mode.NONE || width <= 0 || height <= 0) return
+        val p = page ?: return
+        viewport.screenToPage(width / 2f, height / 2f, tmp)
+        val cy = tmp[1]
+        val dir = when {
+            cy > p.heightMm + SHEET_GAP_MM / 2f && nextSheet != null -> 1
+            cy < -SHEET_GAP_MM / 2f && previousSheet != null -> -1
+            else -> return
+        }
+        switchPending = true
+        removeCallbacks(clearSwitchPending)
+        postDelayed(clearSwitchPending, 800L)
+        onRequestPage?.invoke(dir)
+    }
+
+    /** Page-space y of the first row below the last sheet that is visible, in px: how far the stack was pulled up. */
+    private fun pullRevealPx(): Float {
+        val p = page ?: return 0f
+        if (!isPaged || nextSheet != null || viewport.rotationDeg != 0f) return 0f
+        viewport.pageToScreen(0f, p.heightMm, tmp)
+        return max(0f, height - tmp[1])
+    }
+
+    private fun pullIsArmed(): Boolean = pullRevealPx() >= PULL_ARM_DP * resources.displayMetrics.density
+
+    /** Finger lifted: add the page if the pull was long enough, then glide back inside the scroll limits. */
+    private fun onAllPointersUp() {
+        if (!isPaged) return
+        if (pullIsArmed()) onPullToAddPage?.invoke()
+        val from = viewport
+        val to = constrained(from, 1f, 0f)
+        if (to == from) return
+        settleAnimator?.cancel()
+        settleAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 180L
+            addUpdateListener {
+                val t = it.animatedFraction
+                setViewport(
+                    from.copy(
+                        translationX = from.translationX + (to.translationX - from.translationX) * t,
+                        translationY = from.translationY + (to.translationY - from.translationY) * t
+                    )
+                )
+            }
+            start()
+        }
+    }
+
+    private fun markGestureActive() {
+        pdfTiles?.gestureActive = true
+        removeCallbacks(gestureEndRunnable)
+        postDelayed(gestureEndRunnable, GESTURE_SETTLE_MS)
     }
 
     /** Requests one front-buffer frame (instrument or handle changes). */
@@ -423,6 +655,10 @@ class FrontBufferedInkView(
         val p = page
         val i = index
 
+        // Behind everything: the desk under the sheets, or the paper colour on the infinite canvas (so a fast pan never
+        // flashes transparent where the cached bitmap does not reach yet).
+        canvas.drawColor(if (isPaged) deskColorArgb else (p?.template?.paperColor?.argb ?: 0xFFFFFFFF.toInt()) or (0xFF shl 24))
+
         if (p != null && i != null) {
             val cached = dryViewport
             val moved = cached != null && cached != v
@@ -444,6 +680,8 @@ class FrontBufferedInkView(
             }
         }
 
+        drawPullHint(canvas)
+
         // ---- wet layer: in-progress stroke, instruments, laser, eraser cursor, snap handles, lasso ----
         canvas.save()
         applyViewport(canvas, v)
@@ -464,7 +702,7 @@ class FrontBufferedInkView(
         if (dropHighlight) {
             val stroke = 3f * resources.displayMetrics.density
             dropPaint.strokeWidth = stroke
-            dropPaint.color = 0xFFD9845B.toInt()
+            dropPaint.color = 0xFF3B82F6.toInt()
             canvas.drawRect(stroke / 2f, stroke / 2f, w - stroke / 2f, h - stroke / 2f, dropPaint)
         }
 
@@ -486,21 +724,102 @@ class FrontBufferedInkView(
         dryCtx.pxPerMm = v.pxPerMm
         dryCtx.smartInversion = smartInversion
         dryCtx.isExport = false
-        dryRenderer.background = dryBackground
-        dryRenderer.render(
-            c,
-            p,
-            i,
-            visiblePageBounds(v, w.toFloat(), h.toFloat()),
-            dryCtx,
-            activeAudioPlaybackMs = if (audioPlaybackMs >= 0L) audioPlaybackMs else null,
-            pxPerMm = v.pxPerMm,
-            zoom = v.zoom
-        )
+        val visible = visiblePageBounds(v, w.toFloat(), h.toFloat())
+        if (isPaged) {
+            renderSheetStack(c, p, i, visible, v)
+        } else {
+            dryRenderer.background = dryBackground
+            dryRenderer.render(
+                c,
+                p,
+                i,
+                visible,
+                dryCtx,
+                activeAudioPlaybackMs = if (audioPlaybackMs >= 0L) audioPlaybackMs else null,
+                pxPerMm = v.pxPerMm,
+                zoom = v.zoom,
+                isInfiniteCanvas = true
+            )
+        }
         c.restore()
         dryViewport = v
         dryDirty = false
         lastDryRenderMs = now
+    }
+
+    /**
+     * Current sheet at the page-space origin, the previous one above it and the next one below, each with its shadow,
+     * border and "n/N" badge. Neighbours are display-only (no R-Tree, no editing) until the stack scrolls onto them.
+     */
+    private fun renderSheetStack(c: Canvas, p: NotebookPage, i: SpatialRTreeIndex, visible: StrokeBounds, v: ViewportTransform) {
+        val replay = if (audioPlaybackMs >= 0L) audioPlaybackMs else null
+        previousSheet?.let { prev ->
+            drawNeighbour(c, prev, (p.widthMm - prev.widthMm) / 2f, -(prev.heightMm + SHEET_GAP_MM), sheetNumber - 1, visible, v)
+        }
+        nextSheet?.let { next ->
+            drawNeighbour(c, next, (p.widthMm - next.widthMm) / 2f, p.heightMm + SHEET_GAP_MM, sheetNumber + 1, visible, v)
+        }
+        dryRenderer.drawSheetChrome(c, p, v.pxPerMm, true)
+        dryRenderer.background = dryBackground
+        dryRenderer.render(
+            c, p, i, visible, dryCtx,
+            activeAudioPlaybackMs = replay,
+            pxPerMm = v.pxPerMm,
+            zoom = v.zoom,
+            isInfiniteCanvas = false
+        )
+        if (sheetCount > 1) dryRenderer.drawSheetBadge(c, p, "$sheetNumber/$sheetCount", v.pxPerMm)
+    }
+
+    private fun drawNeighbour(
+        c: Canvas, sheet: NotebookPage, ox: Float, oy: Float, number: Int, visible: StrokeBounds, v: ViewportTransform
+    ) {
+        val margin = 8f
+        if (visible.right < ox - margin || visible.left > ox + sheet.widthMm + margin ||
+            visible.bottom < oy - margin || visible.top > oy + sheet.heightMm + margin
+        ) return
+        val local = StrokeBounds(visible.left - ox, visible.top - oy, visible.right - ox, visible.bottom - oy)
+        c.save()
+        c.translate(ox, oy)
+        dryRenderer.drawSheetChrome(c, sheet, v.pxPerMm, true)
+        dryRenderer.background = null
+        dryRenderer.render(
+            c, sheet, null, local, dryCtx,
+            activeAudioPlaybackMs = null,
+            pxPerMm = v.pxPerMm,
+            zoom = v.zoom,
+            isInfiniteCanvas = false
+        )
+        dryRenderer.drawSheetBadge(c, sheet, "$number/$sheetCount", v.pxPerMm)
+        c.restore()
+    }
+
+    /** "+ / Pull to add the new page" under the last sheet while the stack is pulled up past it. */
+    private fun drawPullHint(canvas: Canvas) {
+        val reveal = pullRevealPx()
+        val d = resources.displayMetrics.density
+        if (reveal < 28f * d) return
+        val p = page ?: return
+        viewport.pageToScreen(0f, p.heightMm, tmp)
+        val armed = reveal >= PULL_ARM_DP * d
+        val cx = width / 2f
+        val cy = tmp[1] + (reveal * 0.5f).coerceAtMost(70f * d)
+        val r = 20f * d
+        pullPaint.style = Paint.Style.FILL
+        pullPaint.color = if (armed) 0xFF3B82F6.toInt() else 0x66FFFFFF
+        canvas.drawCircle(cx, cy - 18f * d, r, pullPaint)
+        pullPaint.style = Paint.Style.STROKE
+        pullPaint.strokeWidth = 2.4f * d
+        pullPaint.strokeCap = Paint.Cap.ROUND
+        pullPaint.color = if (armed) 0xFFFFFFFF.toInt() else 0xFF152036.toInt()
+        canvas.drawLine(cx - 8f * d, cy - 18f * d, cx + 8f * d, cy - 18f * d, pullPaint)
+        canvas.drawLine(cx, cy - 26f * d, cx, cy - 10f * d, pullPaint)
+        pullPaint.style = Paint.Style.FILL
+        pullPaint.textAlign = Paint.Align.CENTER
+        pullPaint.textSize = 13f * d
+        pullPaint.typeface = Typeface.DEFAULT_BOLD
+        pullPaint.color = 0xFFCBD5E1.toInt()
+        canvas.drawText(if (armed) "Release to add the new page" else "\u2191 Pull to add the new page", cx, cy + 22f * d, pullPaint)
     }
 
     /** Draws just the new stroke into the cached dry bitmap when that is exactly equivalent to a full re-render. */
@@ -520,6 +839,7 @@ class FrontBufferedInkView(
         dryCtx.paperIsDark = p.template.paperColor.isDark
         dryCtx.smartInversion = smartInversion
         dryCtx.isExport = false
+        if (isPaged) c.clipRect(0f, 0f, p.widthMm, p.heightMm)
         dryStrokes.drawStroke(c, stroke, dryCtx)
         c.restore()
         return true
@@ -594,7 +914,12 @@ class FrontBufferedInkView(
             is InputRouting.Rejected -> tapValid = false
         }
         val a = event.actionMasked
-        if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) onTouchReleased?.invoke()
+        if (a == MotionEvent.ACTION_DOWN) settleAnimator?.cancel()
+        if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+            onAllPointersUp()
+            onTouchReleased?.invoke()
+            checkCentreCrossing()
+        }
         return true
     }
 
@@ -625,9 +950,15 @@ class FrontBufferedInkView(
 
     private fun handleGesture(cmd: GestureCommand) {
         when (cmd) {
-            is GestureCommand.Transform -> setViewport(viewport.applyGesture(cmd))
+            is GestureCommand.Transform -> {
+                markGestureActive()
+                val effective = if (zoomLocked) cmd.copy(scaleFactor = 1f, rotationDeltaDeg = 0f) else cmd
+                val moved = viewport.applyGesture(effective, minZoom())
+                // A sheet smaller than the view glides to the centre while the fingers are still down.
+                setViewport(constrained(moved, GESTURE_CENTRE_SMOOTHING, PULL_MAX_DP * resources.displayMetrics.density))
+            }
             is GestureCommand.FitToWidth -> {
-                page?.let { setViewport(viewport.fitToWidth(width.toFloat(), it.widthMm)) }
+                if (page != null) setViewport(fitViewport())
                 gestureListener?.invoke(cmd)
             }
             else -> gestureListener?.invoke(cmd)
@@ -659,6 +990,11 @@ class FrontBufferedInkView(
     }
 
     private fun onFingerTap(sx: Float, sy: Float) {
+        val pins = pinTapHandler
+        if (pins != null) {
+            viewport.screenToPage(sx, sy, tmp)
+            if (pins(tmp[0], tmp[1])) return
+        }
         if (tapInterceptor?.invoke(sx, sy) == true) return
         if (fillMode) {
             fillAt(sx, sy)
@@ -856,11 +1192,26 @@ class FrontBufferedInkView(
                 laser.begin(tool, x, y, now)
             }
             else -> {
+                val pinHandler = pinTapHandler
+                if (pinHandler != null && pinHandler(x, y)) {
+                    mode = Mode.IGNORED
+                    return
+                }
                 val p = page
                 val layer = p?.layerById(activeLayerId)
                 if (p == null || layer == null || !layer.isEditable) {
                     mode = Mode.REJECTED
                     _events.tryEmit(InkViewEvent.LockedLayerRejected(activeLayerId, layer?.name))
+                    return
+                }
+                if (isPaged && (x < 0f || y < 0f || x > p.widthMm || y > p.heightMm)) {
+                    // Pen landed on the desk or on a neighbouring sheet: never draw there. A neighbour becomes the
+                    // working page so the next stroke goes on it.
+                    mode = Mode.IGNORED
+                    when {
+                        y > p.heightMm && nextSheet != null -> onRequestPage?.invoke(1)
+                        y < 0f && previousSheet != null -> onRequestPage?.invoke(-1)
+                    }
                     return
                 }
                 mode = Mode.INK
@@ -889,6 +1240,13 @@ class FrontBufferedInkView(
         if (inst != null && inst.constrainStylusPoint(x, y, tmp)) {
             x = tmp[0]
             y = tmp[1]
+        }
+        if (isPaged) {
+            val sheet = page
+            if (sheet != null) {
+                x = x.coerceIn(0f, sheet.widthMm)
+                y = y.coerceIn(0f, sheet.heightMm)
+            }
         }
         buffer.add(x, y, raw.pressure, stabilizer.tilt, raw.orientation, raw.timeMs.toFloat())
         if (hypot(x - anchorX, y - anchorY) > HOLD_MOVE_DP * resources.displayMetrics.density / viewport.pxPerMm) {
@@ -1043,5 +1401,12 @@ class FrontBufferedInkView(
         const val SETTLE_MS = 90L
         const val REPLAY_STEP_MS = 66L
         const val LIVE_REDRAW_MS = 160L
+        const val GESTURE_SETTLE_MS = 120L
+        const val GESTURE_CENTRE_SMOOTHING = 0.35f
+        const val SHEET_GAP_MM = 7f
+        const val SHEET_MARGIN_DP = 12f
+        const val PULL_ARM_DP = 110f
+        const val PULL_MAX_DP = 160f
+        const val DEFAULT_DESK_ARGB = 0xFF152036.toInt()
     }
 }

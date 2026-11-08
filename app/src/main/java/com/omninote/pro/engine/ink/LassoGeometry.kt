@@ -7,6 +7,7 @@ import com.omninote.pro.core.model.ShapePrimitive
 import com.omninote.pro.core.model.StencilInstance
 import com.omninote.pro.core.model.Stroke
 import com.omninote.pro.core.model.StrokeBounds
+import com.omninote.pro.core.model.AudioClipElement
 import com.omninote.pro.core.model.TextBoxElement
 import kotlin.math.abs
 import kotlin.math.cos
@@ -58,6 +59,7 @@ internal object LassoGeometry {
             is ImageElement -> !element.isLockedToBackground && quadHits(element.bounds, element.rotationDeg, poly, n)
             is TextBoxElement -> quadHits(element.bounds, element.rotationDeg, poly, n)
             is StencilInstance -> quadHits(element.spatialBounds, 0f, poly, n)
+            is AudioClipElement -> quadHits(element.spatialBounds, 0f, poly, n)
         }
     }
 

@@ -107,3 +107,11 @@ fun TextBoxElement.transformed(m: AffineTransform2D): TextBoxElement {
         fontSizePt = (fontSizePt * k).coerceIn(1f, 1000f)
     )
 }
+
+/** A pin keeps its size and orientation: a selection move, scale or rotation only relocates it (by its centre). */
+fun AudioClipElement.transformed(m: AffineTransform2D): AudioClipElement {
+    val b = spatialBounds
+    val cx = m.applyX(b.centerX, b.centerY)
+    val cy = m.applyY(b.centerX, b.centerY)
+    return copy(positionMm = PointMm(cx - AudioClipElement.PIN_WIDTH_MM / 2f, cy - AudioClipElement.PIN_HEIGHT_MM / 2f))
+}

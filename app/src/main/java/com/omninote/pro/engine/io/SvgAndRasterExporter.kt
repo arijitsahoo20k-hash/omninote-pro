@@ -12,6 +12,7 @@ import com.omninote.pro.core.model.Layer
 import com.omninote.pro.core.model.NotebookPage
 import com.omninote.pro.core.model.PageElement
 import com.omninote.pro.core.model.StrokeBounds
+import com.omninote.pro.core.model.AudioClipElement
 import com.omninote.pro.core.model.TextBoxElement
 import com.omninote.pro.data.PageDao
 import com.omninote.pro.data.PagePayloadStore
@@ -84,8 +85,10 @@ class SvgAndRasterExporter(
         output: OutputStream
     ): SvgResult = withContext(Dispatchers.Default) {
         val page = loadPage(notebookId, pageId)
-        val svg = buildSvg(page, options, null, null)
-        write(output, svg, page.widthMm, page.heightMm)
+        val infinite = kit.isInfiniteCanvas(notebookId)
+        val smart = smartRegion(page, infinite)
+        val svg = buildSvg(page, options, null, smart, smart != null, infinite)
+        write(output, svg, smart?.width ?: page.widthMm, smart?.height ?: page.heightMm)
     }
 
     suspend fun exportSelectionToSvg(
@@ -98,7 +101,7 @@ class SvgAndRasterExporter(
         val page = loadPage(notebookId, pageId)
         val region = selectionBounds(page, elementIds, options.selectionPaddingMm)
             ?: throw IllegalArgumentException("None of the requested elements exist on this page")
-        val svg = buildSvg(page, options.copy(transparentBackground = true), elementIds, region)
+        val svg = buildSvg(page, options.copy(transparentBackground = true), elementIds, region, false, false)
         write(output, svg, region.width, region.height)
     }
 
@@ -113,7 +116,9 @@ class SvgAndRasterExporter(
         page: NotebookPage,
         options: SvgExportOptions,
         only: Set<String>?,
-        region: StrokeBounds?
+        region: StrokeBounds?,
+        smart: Boolean,
+        infinite: Boolean
     ): String {
         val renderer = kit.newRenderer()
         val images = SyncImageBitmapProvider(kit.filesDir)
@@ -145,6 +150,10 @@ class SvgAndRasterExporter(
                 }
                 is ImageElement -> {
                     writeImage(canvas, e, images)
+                    true
+                }
+                is AudioClipElement -> {
+                    SvgAudioPin.write(canvas, e)
                     true
                 }
                 else -> false
@@ -181,7 +190,9 @@ class SvgAndRasterExporter(
                     onlyElementIds = only,
                     layerObserver = observer,
                     elementHook = hook,
-                    underlay = underlay
+                    underlay = underlay,
+                    allowRegionOutsidePage = smart,
+                    infiniteCanvas = infinite
                 ),
                 regionMm = region
             )
@@ -247,7 +258,9 @@ class SvgAndRasterExporter(
         output: OutputStream
     ): RasterResult = withContext(Dispatchers.Default) {
         val page = loadPage(notebookId, pageId)
-        renderRaster(page, options, null, null, output)
+        val infinite = kit.isInfiniteCanvas(notebookId)
+        val smart = smartRegion(page, infinite)
+        renderRaster(page, options, null, smart, output, smart != null, infinite)
     }
 
     /**
@@ -269,7 +282,9 @@ class SvgAndRasterExporter(
             RasterExportOptions(dpi = dpi, format = RasterFormat.PNG, transparentBackground = true),
             elementIds,
             region,
-            output
+            output,
+            false,
+            false
         )
     }
 
@@ -278,7 +293,9 @@ class SvgAndRasterExporter(
         options: RasterExportOptions,
         only: Set<String>?,
         region: StrokeBounds?,
-        output: OutputStream
+        output: OutputStream,
+        smart: Boolean,
+        infinite: Boolean
     ): RasterResult {
         val widthMm = region?.width ?: page.widthMm
         val heightMm = region?.height ?: page.heightMm
@@ -292,7 +309,7 @@ class SvgAndRasterExporter(
         var source: VectorPdfExporter.SourcePdf? = null
         try {
             val jpeg = options.format == RasterFormat.JPEG
-            if (jpeg && options.transparentBackground) bmp.eraseColor(Color.WHITE) else bmp.eraseColor(Color.TRANSPARENT)
+            if (jpeg) bmp.eraseColor(Color.WHITE) else bmp.eraseColor(Color.TRANSPARENT)
             val canvas = Canvas(bmp)
             canvas.scale(w / widthMm, h / heightMm)
             if (region != null) canvas.translate(-region.left, -region.top)
@@ -323,7 +340,9 @@ class SvgAndRasterExporter(
                     includeHiddenLayers = options.includeHiddenLayers,
                     tapeMode = options.tapeMode,
                     onlyElementIds = only,
-                    underlay = underlay
+                    underlay = underlay,
+                    allowRegionOutsidePage = smart,
+                    infiniteCanvas = infinite
                 ),
                 regionMm = region
             )
@@ -344,6 +363,13 @@ class SvgAndRasterExporter(
     }
 
     // =====================================================================================
+
+    /** The smart export frame when it differs from the page rectangle, else null (plain whole-page export). */
+    private fun smartRegion(page: NotebookPage, infinite: Boolean): StrokeBounds? {
+        val b = computeSmartExportBoundsMm(page, infinite)
+        val same = b.left == 0f && b.top == 0f && b.right == page.widthMm && b.bottom == page.heightMm
+        return if (same) null else b
+    }
 
     private suspend fun loadPage(notebookId: String, pageId: String): NotebookPage {
         payloadStore.flush(notebookId, pageId)
@@ -367,6 +393,7 @@ class SvgAndRasterExporter(
             layer.stencils.forEach(::add)
             layer.images.forEach(::add)
             layer.textBoxes.forEach(::add)
+            layer.audioClips.forEach(::add)
         }
         val b = acc ?: return null
         val padded = b.inflate(paddingMm)
@@ -528,5 +555,25 @@ internal object SvgText {
         }
         result.add(Line(current.ifEmpty { listOf(Run("", false, false, false)) }, line.sizeMm, line.indentMm))
         return result
+    }
+}
+
+/** A voice-note pin as a plain SVG pill (rounded rect, play triangle, title and duration). */
+internal object SvgAudioPin {
+    fun write(canvas: SvgRecordingCanvas, clip: AudioClipElement) {
+        val b = clip.spatialBounds
+        val w = b.width
+        val h = b.height
+        val r = h / 2f
+        val m = Matrix(canvas.currentMatrix)
+        val duration = com.omninote.pro.engine.ink.AudioPinPainter.formatDuration(clip.durationMs)
+        fun f(v: Float) = SvgRecordingCanvas.fmt(v, 3)
+        canvas.raw("<g id=\"${SvgRecordingCanvas.escape(clip.id)}\" transform=\"${matrixAttr(m)}\" font-family=\"sans-serif\">")
+        canvas.raw("<rect x=\"${f(b.left)}\" y=\"${f(b.top)}\" width=\"${f(w)}\" height=\"${f(h)}\" rx=\"${f(r)}\" fill=\"#EFF3FA\" stroke=\"#3B82F6\" stroke-width=\"0.35\"/>")
+        canvas.raw("<circle cx=\"${f(b.left + r)}\" cy=\"${f(b.top + r)}\" r=\"${f(r * 0.74f)}\" fill=\"#3B82F6\"/>")
+        canvas.raw("<polygon points=\"${f(b.left + r * 0.82f)},${f(b.top + r * 0.62f)} ${f(b.left + r * 1.42f)},${f(b.top + r)} ${f(b.left + r * 0.82f)},${f(b.top + r * 1.38f)}\" fill=\"#FFFFFF\"/>")
+        canvas.raw("<text x=\"${f(b.left + r * 2f + 0.5f)}\" y=\"${f(b.top + r + 1f)}\" font-size=\"2.9\" fill=\"#1B2A48\">${SvgRecordingCanvas.escape(clip.title)}</text>")
+        canvas.raw("<text x=\"${f(b.right - 1.6f)}\" y=\"${f(b.top + r + 1f)}\" font-size=\"2.9\" font-weight=\"bold\" text-anchor=\"end\" fill=\"#4A5568\">${SvgRecordingCanvas.escape(duration)}</text>")
+        canvas.raw("</g>\n")
     }
 }

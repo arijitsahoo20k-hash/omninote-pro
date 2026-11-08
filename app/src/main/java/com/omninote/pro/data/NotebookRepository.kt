@@ -33,7 +33,9 @@ data class NewNotebookSpec(
     val viewLayout: PageViewLayout,
     val template: TemplateConfig,
     val folderId: String?,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    /** `asset:covers/x.jpg` for a bundled illustration, or an absolute file path for a gallery cover; null = solid colour. */
+    val coverImageUri: String? = null
 )
 
 sealed interface ImportProgress {
@@ -71,7 +73,7 @@ class NotebookRepository(
                 title = spec.title.trim().ifEmpty { "Untitled notebook" },
                 coverColorArgb = spec.coverColorArgb,
                 coverAccentArgb = spec.coverAccentArgb,
-                coverImageUri = null,
+                coverImageUri = spec.coverImageUri,
                 canvasMode = spec.canvasMode.name,
                 scrollAxis = spec.scrollAxis.name,
                 viewLayout = spec.viewLayout.name,

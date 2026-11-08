@@ -339,6 +339,7 @@ class PagePayloadStore(
             bytes += layer.shapes.size * 320L
             bytes += layer.stencils.size * 220L
             bytes += layer.images.size * 260L
+            for (c in layer.audioClips) bytes += 200L + c.audioFilePath.length * 2L + c.title.length * 2L
             for (t in layer.textBoxes) bytes += 260L + t.markdownText.length * 2L
         }
         return (bytes / 1024L + 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()

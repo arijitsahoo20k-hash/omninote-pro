@@ -40,7 +40,8 @@ data class RecorderState(
 }
 
 /**
- * AAC / MPEG-4 (.m4a) voice recorder at 44.1 kHz, 64 kbps, mono, saved to filesDir/audio/{notebookId}/{pageId}.m4a.
+ * AAC / MPEG-4 (.m4a) voice recorder at 44.1 kHz, 64 kbps, mono, saved to filesDir/audio/{notebookId}/{pageId}.m4a (legacy single recording) or
+ * filesDir/audio/{notebookId}/{pageId}_{clipId}.m4a (voice-note clips).
  *
  * Time model: [currentAudioOffsetMs] is the active recording duration, so it freezes while paused and
  * returns null whenever audio is not actually being captured. Strokes drawn in that window get no stamp.
@@ -72,13 +73,13 @@ class AudioSyncRecorder(
         if (!running) null else accumulatedMs + (SystemClock.elapsedRealtime() - resumedAtRealtime)
     }
 
-    fun outputFile(notebookId: String, pageId: String): File =
-        File(File(File(context.filesDir, "audio"), notebookId), "$pageId.m4a")
+    fun outputFile(notebookId: String, pageId: String, clipId: String? = null): File =
+        File(File(File(context.filesDir, "audio"), notebookId), if (clipId == null) "$pageId.m4a" else "${pageId}_$clipId.m4a")
 
     /** Starts a new recording for the page, replacing any existing file. Returns false on failure. */
-    fun start(notebookId: String, pageId: String): Boolean {
+    fun start(notebookId: String, pageId: String, clipId: String? = null): Boolean {
         if (_state.value.status != RecorderStatus.IDLE) return false
-        val file = outputFile(notebookId, pageId)
+        val file = outputFile(notebookId, pageId, clipId)
         return try {
             file.parentFile?.mkdirs()
             if (file.exists()) file.delete()

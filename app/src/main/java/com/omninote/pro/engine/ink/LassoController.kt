@@ -505,10 +505,11 @@ class LassoController(
         val page = host.page ?: return false
         val slop = max(1.5f, 10f / max(pxPerMm, 0.1f))
         for (layer in page.layers.filter { it.isEditable }.sortedByDescending { it.zIndex }) {
-            val candidates = ArrayList<PageElement>(layer.textBoxes.size + layer.stencils.size + layer.images.size)
+            val candidates = ArrayList<PageElement>(layer.textBoxes.size + layer.stencils.size + layer.images.size + layer.audioClips.size)
             candidates.addAll(layer.images)
             candidates.addAll(layer.stencils)
             candidates.addAll(layer.textBoxes)
+            candidates.addAll(layer.audioClips)
             for (k in candidates.indices.reversed()) {
                 val e = candidates[k]
                 if (!filter.accepts(e)) continue
@@ -1030,7 +1031,7 @@ class LassoController(
         const val ACCENT_ON_DARK = 0xFFFFA05C.toInt()
         val ALL_KINDS = setOf(
             SpatialItemKind.STROKE, SpatialItemKind.SHAPE, SpatialItemKind.STENCIL,
-            SpatialItemKind.IMAGE, SpatialItemKind.TEXT_BOX
+            SpatialItemKind.IMAGE, SpatialItemKind.TEXT_BOX, SpatialItemKind.AUDIO_CLIP
         )
     }
 }

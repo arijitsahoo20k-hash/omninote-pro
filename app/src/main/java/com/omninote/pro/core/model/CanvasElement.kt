@@ -6,7 +6,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 @Serializable
-enum class SpatialItemKind { STROKE, SHAPE, STENCIL, IMAGE, TEXT_BOX }
+enum class SpatialItemKind { STROKE, SHAPE, STENCIL, IMAGE, TEXT_BOX, AUDIO_CLIP }
 
 /**
  * Anything that lives on a layer and can be indexed, selected, transformed, restyled and undone uniformly.
@@ -172,4 +172,34 @@ data class TextBoxElement(
     override val spatialBounds: StrokeBounds get() = rotatedFrameBounds(bounds, rotationDeg)
 
     val center: PointMm get() = PointMm(bounds.centerX, bounds.centerY)
+}
+
+/**
+ * A voice recording pinned to a spot on the page, drawn as a small pill badge. Tapping the badge plays or pauses it.
+ *
+ * @property positionMm top-left corner of the badge in page space.
+ * @property audioFilePath path of the .m4a RELATIVE to the app's files directory
+ *                         (`audio/{notebookId}/{pageId}_{clipId}.m4a`), so a restored app keeps working.
+ * @property startOffsetMs where in the file playback starts (a pin can mark a moment inside a longer recording).
+ */
+@Serializable
+data class AudioClipElement(
+    override val id: String,
+    override val layerId: String,
+    val positionMm: PointMm,
+    val audioFilePath: String,
+    val durationMs: Long,
+    val title: String = "Voice Note",
+    val createdAtMs: Long = System.currentTimeMillis(),
+    val startOffsetMs: Long = 0L
+) : PageElement {
+    override val kind: SpatialItemKind get() = SpatialItemKind.AUDIO_CLIP
+    override val spatialBounds: StrokeBounds
+        get() = StrokeBounds(positionMm.x, positionMm.y, positionMm.x + PIN_WIDTH_MM, positionMm.y + PIN_HEIGHT_MM)
+
+    companion object {
+        /** Badge size on the page. Fixed: a pin is a marker, not content that scales with a selection. */
+        const val PIN_WIDTH_MM = 36f
+        const val PIN_HEIGHT_MM = 8.5f
+    }
 }

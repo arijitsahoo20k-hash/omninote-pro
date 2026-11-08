@@ -34,20 +34,29 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Warm, muted workspace palette. Deliberately no purple or indigo anywhere in the chrome. */
+/**
+ * Midnight Navy & Slate workspace palette. The object keeps its historical name so every screen that reads `Warm.*`
+ * picks the new colours up without edits. No purple or indigo: the accent is a clear blue.
+ */
 object Warm {
-    val Accent = Color(0xFFD9845B)
-    val AccentSoft = Color(0x33D9845B)
-    val Glass = Color(0xE6262120)
-    val GlassRaised = Color(0xF03A332F)
-    val GlassEdge = Color(0x33FFF1DC)
-    val Text = Color(0xFFF4EBDD)
-    val TextMuted = Color(0xFFB9AC9A)
-    val Danger = Color(0xFFD9695B)
-    val Ok = Color(0xFF8FB58A)
-    val Warn = Color(0xFFE0B35C)
-    val Scrim = Color(0x99120F0D)
-    val Divider = Color(0x26FFF1DC)
+    // Surfaces (named in the design spec)
+    val Sidebar = Color(0xFF11192B)
+    val Backdrop = Color(0xFF152036)
+    val TopBar = Color(0xFF18233C)
+    val AccentBlue = Color(0xFF3B82F6)
+
+    val Accent = AccentBlue
+    val AccentSoft = Color(0x333B82F6)
+    val Glass = Color(0xE6182440)
+    val GlassRaised = Color(0xF01F2D4D)
+    val GlassEdge = Color(0x33CBD5E1)
+    val Text = Color(0xFFE6ECF5)
+    val TextMuted = Color(0xFF94A3B8)
+    val Danger = Color(0xFFEF6B6B)
+    val Ok = Color(0xFF6BCB9B)
+    val Warn = Color(0xFFE5B85C)
+    val Scrim = Color(0x99080D18)
+    val Divider = Color(0x26CBD5E1)
 }
 
 @Composable
@@ -55,9 +64,9 @@ fun WorkspaceTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Warm.Accent,
-            onPrimary = Color(0xFF2A1A10),
+            onPrimary = Color(0xFFFFFFFF),
             secondary = Warm.Warn,
-            background = Color(0xFF1B1716),
+            background = Warm.Backdrop,
             surface = Warm.Glass,
             onSurface = Warm.Text,
             onBackground = Warm.Text,
@@ -74,7 +83,7 @@ fun Modifier.glass(shape: Shape = RoundedCornerShape(20.dp), raised: Boolean = f
         .clip(shape)
         .background(
             Brush.verticalGradient(
-                if (raised) listOf(Warm.GlassRaised, Warm.Glass) else listOf(Warm.Glass, Color(0xE61F1B1A))
+                if (raised) listOf(Warm.GlassRaised, Warm.Glass) else listOf(Warm.Glass, Color(0xE6131C33))
             ),
             shape
         )
@@ -113,14 +122,14 @@ fun ChipButton(
         modifier
             .heightIn(min = 36.dp)
             .clip(shape)
-            .background(if (selected) Warm.Accent else Color(0x1FFFF1DC), shape)
+            .background(if (selected) Warm.Accent else Color(0x1FCBD5E1), shape)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
-            color = if (selected) Color(0xFF2A1A10) else Warm.Text,
+            color = if (selected) Color(0xFFFFFFFF) else Warm.Text,
             fontSize = 13.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
         )
@@ -152,9 +161,9 @@ fun LabeledSlider(
             colors = SliderDefaults.colors(
                 thumbColor = Warm.Accent,
                 activeTrackColor = Warm.Accent,
-                inactiveTrackColor = Color(0x33FFF1DC),
+                inactiveTrackColor = Color(0x33CBD5E1),
                 disabledThumbColor = Warm.TextMuted,
-                disabledActiveTrackColor = Color(0x55FFF1DC)
+                disabledActiveTrackColor = Color(0x55CBD5E1)
             )
         )
     }
@@ -172,10 +181,10 @@ fun LabeledSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit, 
             checked = checked,
             onCheckedChange = onChange,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color(0xFF2A1A10),
+                checkedThumbColor = Color(0xFFFFFFFF),
                 checkedTrackColor = Warm.Accent,
                 uncheckedThumbColor = Warm.TextMuted,
-                uncheckedTrackColor = Color(0x33FFF1DC),
+                uncheckedTrackColor = Color(0x33CBD5E1),
                 uncheckedBorderColor = Color.Transparent
             )
         )

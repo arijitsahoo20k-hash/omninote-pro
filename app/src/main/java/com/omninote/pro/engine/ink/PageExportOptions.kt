@@ -47,5 +47,12 @@ class PageExportOptions(
     val tapeAccentIds: Set<String> = emptySet(),
     val layerObserver: LayerObserver? = null,
     val elementHook: ((PageElement) -> Boolean)? = null,
-    val underlay: ((Canvas, StrokeBounds) -> Unit)? = null
+    val underlay: ((Canvas, StrokeBounds) -> Unit)? = null,
+    /**
+     * Smart export: the region handed to the renderer may extend beyond the page (an infinite canvas, or ink that
+     * spilled over the sheet edge). Without this the region is clamped to the page.
+     */
+    val allowRegionOutsidePage: Boolean = false,
+    /** The page is an infinite canvas: the template tiles over the whole region instead of stopping at the page rect. */
+    val infiniteCanvas: Boolean = false
 )

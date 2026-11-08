@@ -61,6 +61,7 @@ class ProceduralTemplateRenderer {
     private var hairline = 0.15f
     private var accentRgb = 0
     private var dark = false
+    private var infiniteLattice = false
 
     /**
      * @param pageBoundsMm the page rectangle (use a very large box for infinite canvas).
@@ -74,14 +75,36 @@ class ProceduralTemplateRenderer {
         pageBoundsMm: StrokeBounds,
         visibleViewportMm: StrokeBounds,
         pxPerMm: Float = 0f,
-        ruleRgbOverride: Int? = null
+        ruleRgbOverride: Int? = null,
+        isInfiniteCanvas: Boolean = false
     ) {
-        val left = max(pageBoundsMm.left, visibleViewportMm.left)
-        val top = max(pageBoundsMm.top, visibleViewportMm.top)
-        val right = min(pageBoundsMm.right, visibleViewportMm.right)
-        val bottom = min(pageBoundsMm.bottom, visibleViewportMm.bottom)
+        // Infinite canvas: lattice templates (ruled, grid, dots, crosses, hexagons, isometric) tile the whole visible
+        // viewport in all four quadrants. Page-layout templates (Cornell, planner, ...) stay on the page rectangle.
+        infiniteLattice = isInfiniteCanvas && config.type.tilesForever()
+        val left: Float
+        val top: Float
+        val right: Float
+        val bottom: Float
+        if (isInfiniteCanvas) {
+            left = visibleViewportMm.left
+            top = visibleViewportMm.top
+            right = visibleViewportMm.right
+            bottom = visibleViewportMm.bottom
+        } else {
+            left = max(pageBoundsMm.left, visibleViewportMm.left)
+            top = max(pageBoundsMm.top, visibleViewportMm.top)
+            right = min(pageBoundsMm.right, visibleViewportMm.right)
+            bottom = min(pageBoundsMm.bottom, visibleViewportMm.bottom)
+        }
         if (left >= right || top >= bottom) return
         clip.set(left, top, right, bottom)
+        // Layout templates draw only on the page, but the paper colour still fills the whole viewport.
+        val layoutClip = if (isInfiniteCanvas && !infiniteLattice) {
+            RectF(
+                max(pageBoundsMm.left, left), max(pageBoundsMm.top, top),
+                min(pageBoundsMm.right, right), min(pageBoundsMm.bottom, bottom)
+            )
+        } else null
 
         cv = canvas
         px = pxPerMm
@@ -99,6 +122,13 @@ class ProceduralTemplateRenderer {
         if (config.type == TemplateType.BLANK) {
             cv = null
             return
+        }
+        if (layoutClip != null) {
+            if (layoutClip.left >= layoutClip.right || layoutClip.top >= layoutClip.bottom) {
+                cv = null
+                return
+            }
+            clip.set(layoutClip)
         }
 
         canvas.save()
@@ -132,8 +162,9 @@ class ProceduralTemplateRenderer {
 
     private fun ruled(c: TemplateConfig, page: StrokeBounds) {
         val sp = c.ruledVariant.spacingMm
-        val firstRow = max(3, ceilIdx(clip.top - page.top, sp))
-        val lastRow = min(floorIdx(page.bottom - page.top - sp, sp), floorIdx(clip.bottom - page.top, sp))
+        val firstRow = if (infiniteLattice) ceilIdx(clip.top - page.top, sp) else max(3, ceilIdx(clip.top - page.top, sp))
+        val lastRow = if (infiniteLattice) floorIdx(clip.bottom - page.top, sp)
+        else min(floorIdx(page.bottom - page.top - sp, sp), floorIdx(clip.bottom - page.top, sp))
         if (lastRow >= firstRow && (px <= 0f || sp * px >= MIN_PITCH_PX)) {
             val step = strideFor(lastRow - firstRow + 1)
             beginLines(minorPaint)
@@ -713,6 +744,12 @@ class ProceduralTemplateRenderer {
         p.strokeWidth = width
         p.color = rgb or (0xFF shl 24)
         p.alpha = alpha.coerceIn(0, 255)
+    }
+
+    private fun TemplateType.tilesForever(): Boolean = when (this) {
+        TemplateType.BLANK, TemplateType.RULED, TemplateType.GRID, TemplateType.DOTTED_GRID,
+        TemplateType.CROSS_GRID, TemplateType.HEXAGONAL, TemplateType.ISOMETRIC -> true
+        else -> false
     }
 
     private fun ceilIdx(v: Float, step: Float): Int = ceil(v / step).toInt()

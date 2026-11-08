@@ -552,11 +552,11 @@ private fun ProgressArea(progress: ExportProgress?, running: Boolean, message: S
                     progress = { step.fraction.coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth(),
                     color = Warm.Accent,
-                    trackColor = Color(0x33FFF1DC)
+                    trackColor = Color(0x33CBD5E1)
                 )
                 Text("${step.label}  ·  ${step.done} of ${step.total}", color = Warm.TextMuted, fontSize = 12.sp)
             } else {
-                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Warm.Accent, trackColor = Color(0x33FFF1DC))
+                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Warm.Accent, trackColor = Color(0x33CBD5E1))
                 Text("Working…", color = Warm.TextMuted, fontSize = 12.sp)
             }
         }

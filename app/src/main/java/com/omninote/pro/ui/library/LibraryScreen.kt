@@ -6,6 +6,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -91,7 +97,7 @@ import com.omninote.pro.ui.workspace.Warm
 import com.omninote.pro.ui.workspace.WorkspaceTheme
 import com.omninote.pro.ui.workspace.glass
 
-private val LibraryBackground = Color(0xFF14110F)
+private val LibraryBackground = Color(0xFF11192B)
 
 private sealed interface Dlg {
     data object NewNotebook : Dlg
@@ -128,6 +134,7 @@ fun LibraryScreen(
         val total by vm.totalNotebookCount.collectAsState()
 
         var sidebarOpen by rememberSaveable { mutableStateOf(true) }
+        var kind by rememberSaveable { mutableStateOf(LibraryKind.ALL) }
         var dialog by remember { mutableStateOf<Dlg?>(null) }
         val snackbar = remember { SnackbarHostState() }
 
@@ -159,6 +166,8 @@ fun LibraryScreen(
             }
 
             val sidebar: @Composable (Boolean) -> Unit = { inDrawer ->
+              Box(Modifier.fillMaxHeight().background(Color(0xFF11192B))) {
+                NightMountains(Modifier.matchParentSize())
                 Sidebar(
                     open = inDrawer || sidebarOpen,
                     section = section,
@@ -175,6 +184,7 @@ fun LibraryScreen(
                     onMoveFolder = { dialog = Dlg.MoveFolder(it) },
                     onDeleteFolder = { dialog = Dlg.DeleteFolder(it) }
                 )
+              }
             }
 
             val mainColumn: @Composable (Modifier) -> Unit = { m ->
@@ -201,10 +211,17 @@ fun LibraryScreen(
                     } else {
                         SectionHeader(section, folders, activeTags, vm::clearTags)
                         Box(Modifier.height(8.dp))
+                        KindTabs(kind) { kind = it }
+                        Box(Modifier.height(10.dp))
+                        val shownCards = when (kind) {
+                            LibraryKind.ALL -> cards
+                            LibraryKind.NOTE -> cards.filter { !it.isPdf }
+                            LibraryKind.PDF -> cards.filter { it.isPdf }
+                        }
                         if (cards.isEmpty()) {
                             EmptyState(section, activeTags.isNotEmpty(), total == 0) { dialog = Dlg.NewNotebook }
                         } else {
-                            NotebookGrid(cards, folderNames, onOpenNotebook, { dialog = it }, vm::toggleStar)
+                            NotebookGrid(shownCards, folderNames, onOpenNotebook, { dialog = it }, vm::toggleStar, onCreate = { dialog = Dlg.NewNotebook })
                         }
                     }
                 }
@@ -214,7 +231,7 @@ fun LibraryScreen(
                 ModalNavigationDrawer(
                     drawerState = drawerState,
                     drawerContent = {
-                        ModalDrawerSheet(drawerContainerColor = Color(0xFF1A1613), modifier = Modifier.width(300.dp)) { sidebar(true) }
+                        ModalDrawerSheet(drawerContainerColor = Color(0xFF11192B), modifier = Modifier.width(300.dp)) { sidebar(true) }
                     }
                 ) {
                     mainColumn(Modifier.fillMaxSize())
@@ -238,8 +255,8 @@ fun LibraryScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Rounded.Add, "New notebook", tint = Color(0xFF2A1A10))
-                Text("New Notebook", color = Color(0xFF2A1A10), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Icon(Icons.Rounded.Add, "New notebook", tint = Color(0xFFFFFFFF))
+                Text("New Notebook", color = Color(0xFFFFFFFF), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
 
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(16.dp)) { data ->
@@ -332,7 +349,6 @@ private fun Sidebar(
             .fillMaxHeight()
             .width(if (open) 280.dp else 76.dp)
             .animateContentSize()
-            .background(Color(0xFF1A1613))
             .padding(10.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -504,14 +520,16 @@ private fun NotebookGrid(
     folderNames: Map<String, String>,
     onOpen: (String, Int) -> Unit,
     onAction: (Dlg) -> Unit,
-    onStar: (NotebookCard) -> Unit
+    onStar: (NotebookCard) -> Unit,
+    onCreate: () -> Unit
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(190.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        columns = GridCells.Adaptive(168.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
         modifier = Modifier.fillMaxSize()
     ) {
+        item(key = "create") { CreateCard(onCreate) }
         items(cards, key = { it.entity.notebookId }) { card ->
             NotebookCardView(card, folderNames[card.entity.folderId], { onOpen(card.entity.notebookId, 0) }, onAction, onStar)
         }
@@ -534,9 +552,9 @@ private fun SearchResults(
         return
     }
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(190.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        columns = GridCells.Adaptive(168.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
         modifier = Modifier.fillMaxSize()
     ) {
         if (state.notebooks.isNotEmpty()) {
@@ -576,25 +594,49 @@ private fun NotebookCardView(
     var menu by remember { mutableStateOf(false) }
     val cover = Color(e.coverColorArgb)
     val accent = Color(e.coverAccentArgb)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(Brush.verticalGradient(listOf(cover, cover.copy(red = cover.red * 0.7f, green = cover.green * 0.7f, blue = cover.blue * 0.7f))))
-            .clickable(onClick = onOpen)
-    ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1.35f)) {
-            Box(Modifier.fillMaxHeight().width(10.dp).background(accent))
-            if (card.isPdf) {
-                Icon(Icons.Rounded.PictureAsPdf, "PDF", tint = accent.copy(alpha = 0.8f), modifier = Modifier.align(Alignment.Center).size(44.dp))
+    val artwork = rememberCoverBitmap(e.coverImageUri)
+    Column(Modifier.fillMaxWidth().clickable(onClick = onOpen), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Portrait cover: the artwork when there is one, otherwise the solid colour with its spine.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.75f)
+                .shadowCard()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Brush.verticalGradient(listOf(cover, cover.copy(red = cover.red * 0.7f, green = cover.green * 0.7f, blue = cover.blue * 0.7f))))
+        ) {
+            if (artwork != null) {
+                androidx.compose.foundation.Image(
+                    artwork, e.title, Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+            } else {
+                Box(Modifier.fillMaxHeight().width(10.dp).background(accent))
+                Text(
+                    e.title, color = Color(0xFFCBD5E1), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 4,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.Center).padding(start = 20.dp, end = 12.dp)
+                )
             }
-            Row(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
-                Box(Modifier.size(38.dp).clickable { onStar(card) }, contentAlignment = Alignment.Center) {
-                    Icon(if (e.isStarred) Icons.Rounded.Star else Icons.Rounded.StarBorder, "Star", tint = if (e.isStarred) accent else Warm.TextMuted)
+            if (card.isPdf) {
+                Text(
+                    "PDF", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
+                        .background(Color(0xCC11192B), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            Row(Modifier.align(Alignment.TopEnd).padding(2.dp)) {
+                Box(
+                    Modifier.size(36.dp).padding(3.dp).background(Color(0x8811192B), CircleShape).clickable { onStar(card) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(if (e.isStarred) Icons.Rounded.Star else Icons.Rounded.StarBorder, "Star", tint = if (e.isStarred) Color(0xFFFFD166) else Color.White, modifier = Modifier.size(18.dp))
                 }
                 Box {
-                    Box(Modifier.size(38.dp).clickable { menu = true }, contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.MoreVert, "Options", tint = Warm.TextMuted)
+                    Box(
+                        Modifier.size(36.dp).padding(3.dp).background(Color(0x8811192B), CircleShape).clickable { menu = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Rounded.MoreVert, "Options", tint = Color.White, modifier = Modifier.size(18.dp))
                     }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem({ Text("Open") }, { menu = false; onOpen() })
@@ -606,24 +648,102 @@ private fun NotebookCardView(
                 }
             }
         }
-        Column(Modifier.fillMaxWidth().background(Color(0x33000000)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(e.title, color = Warm.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        // Title and date sit under the cover.
+        Column(Modifier.fillMaxWidth().padding(horizontal = 2.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(e.title, color = Warm.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 buildString {
-                    append(if (e.pageCount == 1) "1 page" else "${e.pageCount} pages")
+                    append(DateUtils.formatDateTime(null, e.updatedAt, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH or DateUtils.FORMAT_SHOW_YEAR))
+                    append("  ·  ").append(if (e.pageCount == 1) "1 page" else "${e.pageCount} pages")
                     if (folderName != null) append("  ·  ").append(folderName)
                 },
-                color = Warm.TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                DateUtils.getRelativeTimeSpanString(e.updatedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString(),
-                color = Warm.TextMuted, fontSize = 11.sp
+                color = Warm.TextMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             if (card.tags.isNotEmpty()) {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (t in card.tags) Text(t, color = accent, fontSize = 11.sp)
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (t in card.tags) Text(t, color = Warm.Accent, fontSize = 10.sp)
                 }
             }
         }
     }
 }
+
+private fun Modifier.shadowCard(): Modifier = this.shadow(8.dp, RoundedCornerShape(14.dp), clip = false)
+
+/** All / Note / PDF filter tabs above the grid. */
+private enum class LibraryKind(val label: String) { ALL("ALL"), NOTE("NOTE"), PDF("PDF") }
+
+@Composable
+private fun KindTabs(selected: LibraryKind, onSelect: (LibraryKind) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
+        for (k in LibraryKind.values()) {
+            val on = k == selected
+            Column(Modifier.clickable { onSelect(k) }.padding(vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(k.label, color = if (on) Warm.Text else Warm.TextMuted, fontSize = 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, letterSpacing = 1.sp)
+                Box(Modifier.padding(top = 4.dp).height(2.dp).width(24.dp).background(if (on) Warm.Accent else Color.Transparent, RoundedCornerShape(1.dp)))
+            }
+        }
+    }
+}
+
+/** The dashed "+ Create" tile that leads the grid. */
+@Composable
+private fun CreateCard(onCreate: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable(onClick = onCreate), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.75f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0x1A3B82F6))
+                .drawBehind {
+                    drawRoundRect(
+                        color = Color(0xFF3B82F6),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(14.dp.toPx()),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 1.6.dp.toPx(),
+                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
+                        )
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(Icons.Rounded.Add, "Create", tint = Warm.Accent, modifier = Modifier.size(34.dp))
+                Text("Create", color = Warm.Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Text("New notebook", color = Warm.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 2.dp))
+    }
+}
+
+/** Night-mountain vector scene that sits at the bottom of the navy sidebar. */
+@Composable
+private fun NightMountains(modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val band = minOf(h, 190.dp.toPx())
+        val top = h - band
+        // moon
+        drawCircle(Color(0x33DCE6FF), 16.dp.toPx(), Offset(w * 0.76f, top + band * 0.18f))
+        drawCircle(Color(0x66DCE6FF), 9.dp.toPx(), Offset(w * 0.76f, top + band * 0.18f))
+        // a few stars
+        for ((fx, fy) in listOf(0.14f to 0.12f, 0.34f to 0.06f, 0.52f to 0.2f, 0.9f to 0.34f, 0.24f to 0.3f)) {
+            drawCircle(Color(0x88FFFFFF), 1.3.dp.toPx(), Offset(w * fx, top + band * fy))
+        }
+        fun ridge(color: Color, pts: List<Pair<Float, Float>>) {
+            val path = Path().apply {
+                moveTo(0f, h)
+                for ((fx, fy) in pts) lineTo(w * fx, top + band * fy)
+                lineTo(w, h)
+                close()
+            }
+            drawPath(path, color)
+        }
+        ridge(Color(0xFF1A2742), listOf(0f to 0.62f, 0.18f to 0.38f, 0.34f to 0.58f, 0.52f to 0.3f, 0.72f to 0.6f, 0.88f to 0.45f, 1f to 0.58f))
+        ridge(Color(0xFF16213A), listOf(0f to 0.8f, 0.22f to 0.58f, 0.4f to 0.78f, 0.62f to 0.5f, 0.82f to 0.76f, 1f to 0.66f))
+        ridge(Color(0xFF131C31), listOf(0f to 0.94f, 0.3f to 0.78f, 0.55f to 0.92f, 0.8f to 0.8f, 1f to 0.92f))
+    }
+}
+

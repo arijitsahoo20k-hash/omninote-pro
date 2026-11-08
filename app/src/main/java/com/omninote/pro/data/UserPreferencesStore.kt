@@ -123,6 +123,8 @@ data class UserPreferences(
     /** Strict palm rejection by default: a single finger never pans unless this is on (or the Hand tool is active). */
     val singleFingerPanEnabled: Boolean = false,
     val holdToSnapEnabled: Boolean = true,
+    /** Two-finger tap = Undo, three-finger tap = Redo, two-finger double tap = Fit. Off: a resting palm must never undo. */
+    val fingerTapShortcutsEnabled: Boolean = false,
     val autoBackupFolderUri: String? = null,
     val defaultTemplate: TemplateConfig = TemplateConfig(),
     val dockEdge: DockEdge = DockEdge.BOTTOM,
@@ -213,6 +215,8 @@ class UserPreferencesStore(context: Context, private val scope: CoroutineScope) 
     fun setSingleFingerPan(on: Boolean) = update { it.copy(singleFingerPanEnabled = on) }
 
     fun setHoldToSnap(on: Boolean) = update { it.copy(holdToSnapEnabled = on) }
+
+    fun setFingerTapShortcuts(on: Boolean) = update { it.copy(fingerTapShortcutsEnabled = on) }
 
     fun setAutoBackupFolder(uri: String?) = update { it.copy(autoBackupFolderUri = uri) }
 

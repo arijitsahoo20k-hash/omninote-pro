@@ -11,6 +11,7 @@ import com.omninote.pro.core.model.ShapePrimitive
 import com.omninote.pro.core.model.SpatialItemRef
 import com.omninote.pro.core.model.StencilInstance
 import com.omninote.pro.core.model.Stroke
+import com.omninote.pro.core.model.AudioClipElement
 import com.omninote.pro.core.model.TextBoxElement
 import com.omninote.pro.core.model.toRef
 import com.omninote.pro.core.model.transformed
@@ -341,6 +342,7 @@ data class TransformElements(
             override fun stencil(e: StencilInstance) = e.transformed(transform)
             override fun image(e: ImageElement) = e.transformed(transform)
             override fun text(e: TextBoxElement) = e.transformed(transform)
+            override fun audio(e: AudioClipElement) = e.transformed(transform)
         }
         val newPage = page.mappingElements(elementIds, changed, mapper) ?: return null
         return AppliedEdit(
@@ -515,13 +517,15 @@ data class MergeLayerDown(val layerId: String) : LayerOperation {
         val stencils = upper.stencils.map { it.copy(layerId = below.id) }
         val images = upper.images.map { it.copy(layerId = below.id) }
         val texts = upper.textBoxes.map { it.copy(layerId = below.id) }
+        val clips = upper.audioClips.map { it.copy(layerId = below.id) }
 
         val merged = below.copy(
             strokes = below.strokes + strokes,
             shapes = below.shapes + shapes,
             stencils = below.stencils + stencils,
             images = below.images + images,
-            textBoxes = below.textBoxes + texts
+            textBoxes = below.textBoxes + texts,
+            audioClips = below.audioClips + clips
         )
         val moved = ArrayList<SpatialItemRef>(upper.elementCount)
         strokes.forEach { moved.add(it.toRef()) }
@@ -529,6 +533,7 @@ data class MergeLayerDown(val layerId: String) : LayerOperation {
         stencils.forEach { moved.add(it.toRef()) }
         images.forEach { moved.add(it.toRef()) }
         texts.forEach { moved.add(it.toRef()) }
+        clips.forEach { moved.add(it.toRef()) }
 
         val newLayers = page.layers.filter { it.id != upper.id }.map { if (it.id == below.id) merged else it }
         return AppliedEdit(
@@ -553,7 +558,8 @@ data class UnmergeLayer(val upperLayer: Layer, val belowLayerId: String) : Layer
             shapes = below.shapes.filter { it.id !in ids },
             stencils = below.stencils.filter { it.id !in ids },
             images = below.images.filter { it.id !in ids },
-            textBoxes = below.textBoxes.filter { it.id !in ids }
+            textBoxes = below.textBoxes.filter { it.id !in ids },
+            audioClips = below.audioClips.filter { it.id !in ids }
         )
         val newLayers = (page.layers.map { if (it.id == below.id) trimmed else it } + upperLayer).sortedBy { it.zIndex }
         return AppliedEdit(
@@ -618,6 +624,7 @@ private interface ElementMapper {
     fun stencil(e: StencilInstance): StencilInstance = e
     fun image(e: ImageElement): ImageElement = e
     fun text(e: TextBoxElement): TextBoxElement = e
+    fun audio(e: AudioClipElement): AudioClipElement = e
 }
 
 private class Removal(val page: NotebookPage, val slots: List<ElementSlot>)
@@ -641,6 +648,7 @@ private fun Layer.inserting(element: PageElement, index: Int): Layer = when (ele
     is StencilInstance -> copy(stencils = stencils.insertedAt(index, element))
     is ImageElement -> copy(images = images.insertedAt(index, element))
     is TextBoxElement -> copy(textBoxes = textBoxes.insertedAt(index, element))
+    is AudioClipElement -> copy(audioClips = audioClips.insertedAt(index, element))
 }
 
 private fun <T : PageElement> List<T>.removing(
@@ -667,10 +675,11 @@ private fun NotebookPage.removing(ids: Set<String>, strokesOnly: Boolean): Remov
             val st = l.stencils.removing(ids, l.id, slots)
             val im = l.images.removing(ids, l.id, slots)
             val tx = l.textBoxes.removing(ids, l.id, slots)
-            if (s === l.strokes && sh === l.shapes && st === l.stencils && im === l.images && tx === l.textBoxes) {
+            val au = l.audioClips.removing(ids, l.id, slots)
+            if (s === l.strokes && sh === l.shapes && st === l.stencils && im === l.images && tx === l.textBoxes && au === l.audioClips) {
                 l
             } else {
-                l.copy(strokes = s, shapes = sh, stencils = st, images = im, textBoxes = tx)
+                l.copy(strokes = s, shapes = sh, stencils = st, images = im, textBoxes = tx, audioClips = au)
             }
         }
     }
@@ -707,10 +716,11 @@ private fun NotebookPage.mappingElements(
         val st = l.stencils.mappingMatching(ids, changed) { mapper.stencil(it) }
         val im = l.images.mappingMatching(ids, changed) { mapper.image(it) }
         val tx = l.textBoxes.mappingMatching(ids, changed) { mapper.text(it) }
-        if (s === l.strokes && sh === l.shapes && st === l.stencils && im === l.images && tx === l.textBoxes) {
+        val au = l.audioClips.mappingMatching(ids, changed) { mapper.audio(it) }
+        if (s === l.strokes && sh === l.shapes && st === l.stencils && im === l.images && tx === l.textBoxes && au === l.audioClips) {
             l
         } else {
-            l.copy(strokes = s, shapes = sh, stencils = st, images = im, textBoxes = tx)
+            l.copy(strokes = s, shapes = sh, stencils = st, images = im, textBoxes = tx, audioClips = au)
         }
     }
     if (changed.isEmpty()) return null

@@ -29,7 +29,7 @@ sealed interface InputRouting {
 
 data class PalmRejectionConfig(
     /** Single-finger touches are rejected for this long after the stylus lifts or leaves hover range. */
-    val cooldownMs: Long = 400L,
+    val cooldownMs: Long = 1000L,
     /** AXIS_TOUCH_MAJOR above this (converted to px) is a palm. */
     val palmMajorThresholdDp: Float = 18f,
     val tapSlopDp: Float = 10f,
@@ -132,6 +132,13 @@ class PalmRejectionArbitrator(
     private var rotationEngaged = false
 
     // ---- two-finger double tap ----
+    /**
+     * Two-finger tap = Undo, three-finger tap = Redo, two-finger double tap = Fit to width. Off by default: a resting
+     * palm between pen strokes looks exactly like a two-finger tap and would delete the line just written.
+     */
+    @Volatile
+    var fingerTapShortcutsEnabled: Boolean = false
+
     private var lastTwoFingerTapMs = NO_TIME
     private var pendingUndo = false
     private val undoRunnable = Runnable {
@@ -415,7 +422,7 @@ class PalmRejectionArbitrator(
     private fun finishSequence(now: Long) {
         val duration = now - sequenceStartMs
         val isTap = !tapDisqualified && !transforming && !swipeFired && duration <= config.tapTimeoutMs
-        if (isTap) {
+        if (isTap && fingerTapShortcutsEnabled) {
             when (maxFingers) {
                 2 -> onTwoFingerTap(now)
                 3 -> emit(GestureCommand.Redo)

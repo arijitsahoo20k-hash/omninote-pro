@@ -10,6 +10,7 @@ import com.omninote.pro.core.model.ShapePrimitive
 import com.omninote.pro.core.model.StencilInstance
 import com.omninote.pro.core.model.Stroke
 import com.omninote.pro.core.model.StrokeBounds
+import com.omninote.pro.core.model.AudioClipElement
 import com.omninote.pro.core.model.TextBoxElement
 import com.omninote.pro.core.model.transformed
 import com.omninote.pro.data.AddElement
@@ -35,7 +36,8 @@ data class LassoFilter(
     val shapes: Boolean = true,
     val stencils: Boolean = true,
     val images: Boolean = true,
-    val textBoxes: Boolean = true
+    val textBoxes: Boolean = true,
+    val audioPins: Boolean = true
 ) {
     fun accepts(e: PageElement): Boolean = when (e) {
         is Stroke -> when (e.brush.type) {
@@ -47,6 +49,7 @@ data class LassoFilter(
         is StencilInstance -> stencils
         is ImageElement -> images
         is TextBoxElement -> textBoxes
+        is AudioClipElement -> audioPins
     }
 }
 
@@ -84,6 +87,7 @@ internal fun PageElement.cloned(newId: String, newLayerId: String = layerId): Pa
     is StencilInstance -> copy(id = newId, layerId = newLayerId)
     is ImageElement -> copy(id = newId, layerId = newLayerId)
     is TextBoxElement -> copy(id = newId, layerId = newLayerId)
+    is AudioClipElement -> copy(id = newId, layerId = newLayerId)
 }
 
 internal fun PageElement.transformedBy(m: AffineTransform2D): PageElement = when (this) {
@@ -92,6 +96,7 @@ internal fun PageElement.transformedBy(m: AffineTransform2D): PageElement = when
     is StencilInstance -> transformed(m)
     is ImageElement -> transformed(m)
     is TextBoxElement -> transformed(m)
+    is AudioClipElement -> transformed(m)
 }
 
 internal fun NotebookPage.elementsById(ids: Set<String>): List<PageElement> {
@@ -103,6 +108,7 @@ internal fun NotebookPage.elementsById(ids: Set<String>): List<PageElement> {
         for (e in l.stencils) if (e.id in ids) out.add(e)
         for (e in l.images) if (e.id in ids) out.add(e)
         for (e in l.textBoxes) if (e.id in ids) out.add(e)
+        for (e in l.audioClips) if (e.id in ids) out.add(e)
     }
     return out
 }
@@ -117,7 +123,8 @@ internal fun layerOf(elements: List<PageElement>, layerId: String, pageId: Strin
         shapes = elements.filterIsInstance<ShapePrimitive>(),
         stencils = elements.filterIsInstance<StencilInstance>(),
         images = elements.filterIsInstance<ImageElement>(),
-        textBoxes = elements.filterIsInstance<TextBoxElement>()
+        textBoxes = elements.filterIsInstance<TextBoxElement>(),
+        audioClips = elements.filterIsInstance<AudioClipElement>()
     )
 
 /**

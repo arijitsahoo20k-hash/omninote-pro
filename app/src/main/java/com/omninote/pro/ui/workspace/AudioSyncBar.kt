@@ -72,17 +72,12 @@ fun AudioSyncBar(vm: WorkspaceViewModel, onClose: () -> Unit, modifier: Modifier
     val hasAudio = pages.getOrNull(pageIndex)?.audioFilePath != null
     val recording = rec.status != RecorderStatus.IDLE
 
-    var mode by remember(pageIndex) { mutableStateOf(if (hasAudio) AudioMode.REPLAY else AudioMode.RECORD) }
-    var wasRecording by remember { mutableStateOf(false) }
-    LaunchedEffect(recording, hasAudio) {
-        if (recording) {
-            wasRecording = true
-        } else if (wasRecording && hasAudio) {
-            // Recording just finished: go straight to the playback controls.
-            mode = AudioMode.REPLAY
-            wasRecording = false
-        }
-    }
+    val clips by vm.audioClips.collectAsState()
+    val selectedClipId by vm.selectedClipId.collectAsState()
+    val playingClipId by vm.playingClipId.collectAsState()
+    val pinPlacement by vm.pinPlacementActive.collectAsState()
+
+    var mode by remember(pageIndex) { mutableStateOf(AudioMode.RECORD) }
     val effectiveMode = if (recording) AudioMode.RECORD else mode
 
     // The page only switches to ghost/glow replay rendering while the Replay controls are actually on screen.
@@ -111,10 +106,48 @@ fun AudioSyncBar(vm: WorkspaceViewModel, onClose: () -> Unit, modifier: Modifier
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ChipButton("Record", effectiveMode == AudioMode.RECORD, { if (!recording) mode = AudioMode.RECORD })
-            ChipButton("Replay", effectiveMode == AudioMode.REPLAY, { if (!recording) mode = AudioMode.REPLAY })
+            if (hasAudio) ChipButton("Synced replay", effectiveMode == AudioMode.REPLAY, { if (!recording) mode = AudioMode.REPLAY })
             Box(Modifier.weight(1f))
-            ToolButton(selected = false, onClick = { vm.exitAudioReplay(); onClose() }, size = 36.dp) {
+            ToolButton(selected = false, onClick = { vm.setPinPlacement(false); vm.exitAudioReplay(); onClose() }, size = 36.dp) {
                 Icon(Icons.Rounded.Close, "Close audio bar", tint = Warm.Text)
+            }
+        }
+
+        // ---- the voice notes on this page: tap a chip to play / pause it ----
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (clips.isEmpty()) {
+                Text("No voice notes on this page yet.", color = Warm.TextMuted, fontSize = 12.sp)
+            }
+            for ((i, c) in clips.withIndex()) {
+                val label = "${c.title.ifBlank { "Voice Note ${i + 1}" }} (${com.omninote.pro.engine.ink.AudioPinPainter.formatDuration(c.durationMs)})"
+                ChipButton(
+                    (if (playingClipId == c.id) "\u275A\u275A " else "\u25B6 ") + label,
+                    selectedClipId == c.id,
+                    { vm.toggleAudioClip(c.id) }
+                )
+            }
+        }
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ChipButton("+ New Recording", recording, {
+                mode = AudioMode.RECORD
+                if (!recording) startRecording()
+            })
+            ChipButton(
+                if (pinPlacement) "Tap the page to drop the pin\u2026" else "Pin to Spot on Note",
+                pinPlacement,
+                { vm.setPinPlacement(!pinPlacement) }
+            )
+            val sel = selectedClipId
+            if (sel != null && clips.any { it.id == sel }) {
+                ChipButton("Delete note", false, { vm.deleteAudioClip(sel) })
             }
         }
         when (effectiveMode) {
@@ -169,8 +202,12 @@ private fun RecordPanel(vm: WorkspaceViewModel, rec: RecorderState, hasAudio: Bo
             Waveform(levels, Modifier.fillMaxWidth().height(34.dp))
         }
     }
-    if (rec.status == RecorderStatus.IDLE && hasAudio) {
-        Text("This page already has a recording. Recording again replaces it.", color = Warm.Warn, fontSize = 11.sp)
+    if (rec.status == RecorderStatus.IDLE) {
+        Text(
+            if (hasAudio) "New recordings are added as voice notes next to the earlier ones."
+            else "The first recording also syncs with your handwriting for replay.",
+            color = Warm.TextMuted, fontSize = 11.sp
+        )
     }
     if (rec.error != null) {
         Text(rec.error, color = Warm.Danger, fontSize = 11.sp)
@@ -204,7 +241,7 @@ private fun ReplayPanel(vm: WorkspaceViewModel, hasAudio: Boolean) {
                 colors = SliderDefaults.colors(
                     thumbColor = Warm.Accent,
                     activeTrackColor = Warm.Accent,
-                    inactiveTrackColor = Color(0x33FFF1DC)
+                    inactiveTrackColor = Color(0x33CBD5E1)
                 )
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -250,7 +287,7 @@ private fun Waveform(levels: List<Float>, modifier: Modifier) {
             val level = if (i < offset) 0f else levels[i - offset]
             val h = max(3.dp.toPx(), level * size.height)
             drawRoundRect(
-                color = if (level > 0.02f) Warm.Accent else Color(0x33FFF1DC),
+                color = if (level > 0.02f) Warm.Accent else Color(0x33CBD5E1),
                 topLeft = Offset(i * (barW + gap), mid - h / 2f),
                 size = Size(barW, h),
                 cornerRadius = CornerRadius(barW / 2f, barW / 2f)

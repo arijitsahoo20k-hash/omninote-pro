@@ -21,7 +21,9 @@ data class Layer(
     val shapes: List<ShapePrimitive> = emptyList(),
     val stencils: List<StencilInstance> = emptyList(),
     val images: List<ImageElement> = emptyList(),
-    val textBoxes: List<TextBoxElement> = emptyList()
+    val textBoxes: List<TextBoxElement> = emptyList(),
+    /** Voice-note pins. Appended LAST so the persisted field order of older payloads is unchanged. */
+    val audioClips: List<AudioClipElement> = emptyList()
 ) {
     init {
         require(opacity in 0f..1f) { "Layer opacity must be within [0,1]" }
@@ -31,7 +33,7 @@ data class Layer(
     val isEditable: Boolean get() = isVisible && !isLocked
 
     val elementCount: Int
-        get() = strokes.size + shapes.size + stencils.size + images.size + textBoxes.size
+        get() = strokes.size + shapes.size + stencils.size + images.size + textBoxes.size + audioClips.size
 
     val isEmpty: Boolean get() = elementCount == 0
 
@@ -43,6 +45,7 @@ data class Layer(
         out.addAll(stencils)
         out.addAll(strokes)
         out.addAll(textBoxes)
+        out.addAll(audioClips)
         return out
     }
 
@@ -54,6 +57,7 @@ data class Layer(
             ?: stencils.firstOrNull { it.id == elementId }
             ?: images.firstOrNull { it.id == elementId }
             ?: textBoxes.firstOrNull { it.id == elementId }
+            ?: audioClips.firstOrNull { it.id == elementId }
 
     fun containsElement(elementId: String): Boolean = findElement(elementId) != null
 

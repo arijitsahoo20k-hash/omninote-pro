@@ -122,7 +122,7 @@ private fun StencilTile(vm: WorkspaceViewModel, info: StencilInfo, onClick: () -
     }
     Column(
         Modifier
-            .background(Color(0x14FFF1DC), shape)
+            .background(Color(0x14CBD5E1), shape)
             .border(1.dp, Warm.GlassEdge, shape)
             .clickable(onClick = onClick)
             .padding(8.dp),
@@ -203,7 +203,7 @@ private fun StickerTab(vm: WorkspaceViewModel, onInserted: () -> Unit) {
                     val shape = RoundedCornerShape(16.dp)
                     Column(
                         Modifier
-                            .background(Color(0x14FFF1DC), shape)
+                            .background(Color(0x14CBD5E1), shape)
                             .border(1.dp, Warm.GlassEdge, shape)
                             .clickable { vm.insertSticker(s.stickerId); onInserted() }
                             .padding(8.dp),

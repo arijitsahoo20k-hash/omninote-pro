@@ -240,21 +240,11 @@ private fun Pane(
         onBack = onClose,
         splitActive = split,
         onToggleSplit = onToggleSplit,
+        onCropSnippet = if (page?.isPdfBacked == true && !cropActive) onStartCrop else null,
         overlay = {
-            if (page?.isPdfBacked == true && !cropActive) {
-                Column(
-                    Modifier.align(Alignment.CenterStart).padding(start = 10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    ToolButton(selected = false, onClick = onStartCrop, size = 46.dp) {
-                        Icon(Icons.Rounded.Crop, "Crop question to other pane", tint = Warm.Accent)
-                    }
-                    Text("Crop", color = Warm.TextMuted, fontSize = 10.sp)
-                }
-            }
             if (canSwitch) {
                 Column(
-                    Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = 110.dp),
+                    Modifier.align(Alignment.BottomStart).padding(start = 64.dp, bottom = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     ToolButton(selected = false, onClick = onSwitchNotebook, size = 46.dp) {
@@ -314,7 +304,7 @@ private fun Divider(
     }
 }
 
-private val Color0 = androidx.compose.ui.graphics.Color(0xFF14110F)
+private val Color0 = androidx.compose.ui.graphics.Color(0xFF11192B)
 
 /**
  * Full-pane picker shown in the right half when it has no notebook yet (or after "Switch"): every existing notebook
@@ -361,7 +351,7 @@ private fun RightPanePicker(
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .background(Color(0x14FFF1DC), RoundedCornerShape(14.dp))
+                                    .background(Color(0x14CBD5E1), RoundedCornerShape(14.dp))
                                     .clickable { onPick(nb.notebookId, 0) }
                                     .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically

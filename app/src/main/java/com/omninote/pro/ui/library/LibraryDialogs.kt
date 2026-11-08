@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.draw.clip
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -186,7 +188,7 @@ private fun PickRow(label: String, depth: Int, onClick: () -> Unit) {
         color = Warm.Text, fontSize = 15.sp,
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0x14FFF1DC), RoundedCornerShape(12.dp))
+            .background(Color(0x14CBD5E1), RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(start = (12 + depth * 16).dp, top = 12.dp, bottom = 12.dp, end = 12.dp)
     )
@@ -233,6 +235,15 @@ internal fun NewNotebookDialog(folderId: String?, onCreate: (NewNotebookSpec) ->
     var title by remember { mutableStateOf("") }
     var cover by remember { mutableStateOf(CoverColors[0]) }
     var accent by remember { mutableStateOf(CoverAccents[0]) }
+    var coverImage by remember { mutableStateOf<String?>(null) }
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val coverScope = androidx.compose.runtime.rememberCoroutineScope()
+    val artwork = rememberCoverBitmap(coverImage)
+    val pickCover = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) coverScope.launch { importCustomCover(appContext, uri)?.let { coverImage = it } }
+    }
     var canvasMode by remember { mutableStateOf(CanvasMode.PAGINATED) }
     var axis by remember { mutableStateOf(PageScrollAxis.VERTICAL) }
     var spread by remember { mutableStateOf(false) }
@@ -263,23 +274,30 @@ internal fun NewNotebookDialog(folderId: String?, onCreate: (NewNotebookSpec) ->
                                 .aspectRatio(0.78f)
                                 .background(Color(cover), RoundedCornerShape(12.dp))
                                 .border(1.dp, Warm.GlassEdge, RoundedCornerShape(12.dp))
+                                .clip(RoundedCornerShape(12.dp))
                         ) {
-                            Box(
+                            if (artwork != null) {
+                                androidx.compose.foundation.Image(
+                                    artwork, null, Modifier.fillMaxSize(),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                )
+                            }
+                            if (artwork == null) Box(
                                 Modifier
                                     .align(Alignment.CenterStart)
                                     .fillMaxHeight()
                                     .width(12.dp)
                                     .background(Color(accent), RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp))
                             )
-                            Text(
+                            if (artwork == null) Text(
                                 title.ifBlank { "Untitled" },
-                                color = if (title.isBlank()) Color(0x99FFF1DC) else Color(0xFFFFF1DC),
+                                color = if (title.isBlank()) Color(0x99CBD5E1) else Color(0xFFCBD5E1),
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 4,
                                 modifier = Modifier.align(Alignment.Center).padding(start = 22.dp, end = 10.dp)
                             )
-                            Box(
+                            if (artwork == null) Box(
                                 Modifier
                                     .align(Alignment.BottomStart)
                                     .padding(start = 22.dp, bottom = 12.dp)
@@ -308,9 +326,21 @@ internal fun NewNotebookDialog(folderId: String?, onCreate: (NewNotebookSpec) ->
                     Column(m, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         TextInput(title, "Title, e.g. Rotational Motion") { title = it }
 
-                        SectionLabel("Cover colour")
+                        SectionLabel("Illustrated covers")
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            for (c in CoverColors) CoverCard(c, accent, c == cover) { cover = c }
+                            for (art in IllustratedCovers) ArtCoverCard(art, coverImage == art.uri) {
+                                coverImage = art.uri
+                                accent = art.accentArgb
+                            }
+                        }
+                        ChipButton("+ Custom Cover from Gallery", false, { pickCover.launch("image/*") })
+
+                        SectionLabel("Classic colours")
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (c in CoverColors) CoverCard(c, accent, coverImage == null && c == cover) {
+                                cover = c
+                                coverImage = null
+                            }
                         }
                         SectionLabel("Cover accent")
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -340,7 +370,7 @@ internal fun NewNotebookDialog(folderId: String?, onCreate: (NewNotebookSpec) ->
                                     Column(
                                         Modifier
                                             .weight(1f)
-                                            .background(if (sel) Warm.AccentSoft else Color(0x14FFF1DC), RoundedCornerShape(12.dp))
+                                            .background(if (sel) Warm.AccentSoft else Color(0x14CBD5E1), RoundedCornerShape(12.dp))
                                             .border(1.dp, if (sel) Warm.Accent else Color.Transparent, RoundedCornerShape(12.dp))
                                             .clickable { type = t }
                                             .padding(vertical = 8.dp, horizontal = 4.dp),
@@ -402,7 +432,8 @@ internal fun NewNotebookDialog(folderId: String?, onCreate: (NewNotebookSpec) ->
                                     scrollAxis = axis,
                                     viewLayout = if (spread) PageViewLayout.TWO_PAGE_SPREAD else PageViewLayout.SINGLE_PAGE,
                                     template = config,
-                                    folderId = folderId
+                                    folderId = folderId,
+                                    coverImageUri = coverImage
                                 )
                             )
                             onDismiss()
@@ -496,6 +527,25 @@ private fun CoverCard(argb: Int, accent: Int, selected: Boolean, onClick: () -> 
 }
 
 @Composable
+private fun ArtCoverCard(art: IllustratedCover, selected: Boolean, onClick: () -> Unit) {
+    val bmp = rememberCoverBitmap(art.uri, 240)
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(64.dp).clickable(onClick = onClick)) {
+        Box(
+            Modifier
+                .size(width = 58.dp, height = 78.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Warm.GlassRaised)
+                .border(if (selected) 3.dp else 1.dp, if (selected) Warm.Accent else Warm.GlassEdge, RoundedCornerShape(8.dp))
+        ) {
+            if (bmp != null) androidx.compose.foundation.Image(
+                bmp, art.label, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+        }
+        Text(art.label, color = if (selected) Warm.Text else Warm.TextMuted, fontSize = 9.sp, maxLines = 2, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+    }
+}
+
+@Composable
 private fun Swatch(argb: Int, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
@@ -514,9 +564,9 @@ internal fun ImportProgressDialog(state: ImportUiState, onCancel: () -> Unit, on
         if (state.error == null) {
             val f = state.fraction
             if (f != null) {
-                LinearProgressIndicator(progress = { f.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth(), color = Warm.Accent, trackColor = Color(0x33FFF1DC))
+                LinearProgressIndicator(progress = { f.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth(), color = Warm.Accent, trackColor = Color(0x33CBD5E1))
             } else {
-                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Warm.Accent, trackColor = Color(0x33FFF1DC))
+                LinearProgressIndicator(Modifier.fillMaxWidth(), color = Warm.Accent, trackColor = Color(0x33CBD5E1))
             }
             if (state.step.isNotEmpty()) Text(state.step, color = Warm.TextMuted, fontSize = 12.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { ChipButton("Cancel", false, onCancel) }

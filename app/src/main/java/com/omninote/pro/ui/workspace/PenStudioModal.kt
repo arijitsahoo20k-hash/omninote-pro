@@ -227,7 +227,7 @@ private fun TypeCards(draft: BrushConfig, commit: (BrushConfig) -> Unit) {
                 Row(
                     Modifier
                         .weight(1f)
-                        .background(if (sel) Warm.AccentSoft else Color(0x14FFF1DC), RoundedCornerShape(14.dp))
+                        .background(if (sel) Warm.AccentSoft else Color(0x14CBD5E1), RoundedCornerShape(14.dp))
                         .border(1.dp, if (sel) Warm.Accent else Color.Transparent, RoundedCornerShape(14.dp))
                         .clickable { if (!sel) commit(freshFor(t.type, draft)) }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -389,7 +389,7 @@ private fun PressureCurveEditor(curve: PressureCurveConfig, onChange: (PressureC
     Box(
         Modifier
             .size(200.dp)
-            .background(Color(0x14FFF1DC), RoundedCornerShape(14.dp))
+            .background(Color(0x14CBD5E1), RoundedCornerShape(14.dp))
             .border(1.dp, Warm.GlassEdge, RoundedCornerShape(14.dp))
             .onSizeChanged { box = it }
             .pointerInput(Unit) {
@@ -424,12 +424,12 @@ private fun PressureCurveEditor(curve: PressureCurveConfig, onChange: (PressureC
     ) {
         ComposeCanvas(Modifier.fillMaxSize()) {
             val w = size.width; val h = size.height
-            val grid = Color(0x22FFF1DC)
+            val grid = Color(0x22CBD5E1)
             for (i in 1..3) {
                 drawLine(grid, Offset(w * i / 4f, 0f), Offset(w * i / 4f, h), 1f)
                 drawLine(grid, Offset(0f, h * i / 4f), Offset(w, h * i / 4f), 1f)
             }
-            drawLine(Color(0x33FFF1DC), Offset(0f, h), Offset(w, 0f), 1.5f)
+            drawLine(Color(0x33CBD5E1), Offset(0f, h), Offset(w, 0f), 1.5f)
             val p0 = Offset(0f, h)
             val p3 = Offset(w, 0f)
             val p1 = Offset(curve.c1x * w, (1f - curve.c1y) * h)

@@ -103,21 +103,30 @@ class VectorPdfExporter(
                 isPdfExport = true
             )
             val renderOptionsBase = options
+            val infiniteCanvas = kit.isInfiniteCanvas(notebookId)
             for ((n, idx) in indices.withIndex()) {
                 currentCoroutineContext().ensureActive()
                 val meta = metas[idx]
                 val layers = payloadStore.load(notebookId, meta.pageId) ?: emptyList()
                 val page = meta.toPage(layers).copy(index = idx)
 
+                // Smart framing: an infinite canvas (or ink that spilled past the sheet) is exported around its content.
+                val infinite = infiniteCanvas
+                val smart = computeSmartExportBoundsMm(page, infinite)
+                val framed = !(smart.left == 0f && smart.top == 0f && smart.right == page.widthMm && smart.bottom == page.heightMm)
+                val frame = if (framed) smart else StrokeBounds(0f, 0f, page.widthMm, page.heightMm)
+                // PDF pages are limited to 14400 units; a very large canvas is scaled down to fit.
+                val pdfScale = minOf(1f, PDF_MAX_PAGE_UNITS / max(frame.width * PT_PER_MM, frame.height * PT_PER_MM))
                 val info = PdfDocument.PageInfo.Builder(
-                    max(1, (page.widthMm * PT_PER_MM).roundToInt()),
-                    max(1, (page.heightMm * PT_PER_MM).roundToInt()),
+                    max(1, (frame.width * PT_PER_MM * pdfScale).roundToInt()),
+                    max(1, (frame.height * PT_PER_MM * pdfScale).roundToInt()),
                     n + 1
                 ).create()
                 val pdfPage = doc.startPage(info)
                 try {
                     val canvas = pdfPage.canvas
-                    canvas.scale(PT_PER_MM, PT_PER_MM)
+                    canvas.scale(PT_PER_MM * pdfScale, PT_PER_MM * pdfScale)
+                    if (framed) canvas.translate(-frame.left, -frame.top)
                     val underlay: ((Canvas, StrokeBounds) -> Unit)? = page.pdfPageIndex?.let { pdfIdx ->
                         val src = source ?: SourcePdf.open(kit.pdfFile(notebookId))?.also { source = it }
                         if (src == null) {
@@ -136,8 +145,11 @@ class VectorPdfExporter(
                             forcePrintWhite = renderOptionsBase.backgroundMode == PdfBackgroundMode.FORCE_PRINT_WHITE,
                             includeHiddenLayers = renderOptionsBase.includeHiddenLayers,
                             tapeMode = renderOptionsBase.studyTapeMode,
-                            underlay = underlay
-                        )
+                            underlay = underlay,
+                            allowRegionOutsidePage = framed,
+                            infiniteCanvas = infinite
+                        ),
+                        regionMm = if (framed) frame else null
                     )
                 } finally {
                     doc.finishPage(pdfPage)
@@ -227,6 +239,9 @@ class VectorPdfExporter(
     companion object {
         /** Points per millimetre: 72 / 25.4. */
         const val PT_PER_MM = 72f / 25.4f
+
+        /** The PDF format's practical page-size ceiling (user units). */
+        const val PDF_MAX_PAGE_UNITS = 14400f
         private const val TEXTBOOK_DPI = 300f
         private const val MAX_UNDERLAY_PIXELS = 40_000_000f
     }

@@ -16,7 +16,9 @@ class InkRenderContext(
      * True when drawing onto an android.graphics.pdf.PdfDocument canvas, whose backend does not reliably encode
      * blend modes. Highlighters then use plain SRC_OVER at 35% alpha so they never turn opaque over text.
      */
-    var isPdfExport: Boolean = false
+    var isPdfExport: Boolean = false,
+    /** Id of the voice-note pin that is playing right now; its badge is drawn glowing. Null when none is. */
+    var playingAudioClipId: String? = null
 ) {
     /** Export always uses the saved semantic colours on white paper. */
     val invertForDisplay: Boolean get() = paperIsDark && smartInversion && !isExport
@@ -30,6 +32,7 @@ class InkRenderContext(
         smartInversion = other.smartInversion
         isExport = other.isExport
         isPdfExport = other.isPdfExport
+        playingAudioClipId = other.playingAudioClipId
     }
 }
 

@@ -136,7 +136,7 @@ private fun TypeGrid(
                 Column(
                     Modifier
                         .weight(1f)
-                        .background(if (sel) Warm.AccentSoft else Color(0x14FFF1DC), RoundedCornerShape(12.dp))
+                        .background(if (sel) Warm.AccentSoft else Color(0x14CBD5E1), RoundedCornerShape(12.dp))
                         .border(1.dp, if (sel) Warm.Accent else Color.Transparent, RoundedCornerShape(12.dp))
                         .clickable { onChange(config.copy(type = type)) }
                         .padding(6.dp),

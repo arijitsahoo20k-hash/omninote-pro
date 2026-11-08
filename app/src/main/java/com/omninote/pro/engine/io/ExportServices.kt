@@ -24,7 +24,7 @@ class ExportServices(
             payloadStore: PagePayloadStore,
             stencils: ScientificStencilRepository
         ): ExportServices {
-            val kit = ExportRenderKit(context.applicationContext, stencils)
+            val kit = ExportRenderKit(context.applicationContext, stencils, db.notebookDao())
             val pageDao = db.pageDao()
             return ExportServices(
                 kit = kit,

@@ -7,6 +7,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -46,6 +54,7 @@ fun WorkspaceScreen(
     modifier: Modifier = Modifier,
     splitActive: Boolean = false,
     onToggleSplit: () -> Unit = {},
+    onCropSnippet: (() -> Unit)? = null,
     overlay: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {}
 ) {
     WorkspaceTheme {
@@ -69,6 +78,8 @@ fun WorkspaceScreen(
         var showTemplates by remember { mutableStateOf(false) }
         var showAudio by remember { mutableStateOf(false) }
         var showExport by remember { mutableStateOf(false) }
+        var showTextBox by remember { mutableStateOf(false) }
+        var confirmDeletePage by remember { mutableStateOf(false) }
         var container by remember { mutableStateOf(IntSize.Zero) }
 
         val snackbar = remember { SnackbarHostState() }
@@ -119,16 +130,39 @@ fun WorkspaceScreen(
             }
         }
 
+        // ---- safe-inset layout -------------------------------------------------------------------------------
+        // One place decides where everything goes so nothing can collide: the two-row top chrome sits at the top; the
+        // tool strip hugs its chosen edge BELOW the chrome; the canvas gives up exactly the space those two take; the
+        // audio bar goes under the chrome (and under a top-docked strip), clear of a left / right strip.
         val edge = prefs.dockEdge
-        val pillAlignment = if (edge == DockEdge.BOTTOM || edge == DockEdge.RIGHT) Alignment.BottomStart else Alignment.BottomEnd
-        val scrubberAlignment = if (edge == DockEdge.RIGHT) Alignment.CenterStart else Alignment.CenterEnd
+        val dockExpanded = !prefs.dockCollapsed
+        val density = LocalDensity.current.density
+        val chromeTop = if (topBarVisible) TopChromeHeight else 0.dp
+        val dockSpace = if (dockExpanded) DockReservedSpace else 0.dp
+        val dockStart = if (edge == DockEdge.LEFT) dockSpace else 0.dp
+        val dockEnd = if (edge == DockEdge.RIGHT) dockSpace else 0.dp
+        val dockTop = if (edge == DockEdge.TOP) dockSpace else 0.dp
+        val dockBottom = if (edge == DockEdge.BOTTOM) dockSpace else 0.dp
+        // A collapsed pill is small but still occupies the edge it collapsed to.
+        val pillSide = if (!dockExpanded) 64.dp else 0.dp
+        val barStart = (if (edge == DockEdge.LEFT) maxOf(dockStart, pillSide) else 0.dp)
+        val barEnd = (if (edge == DockEdge.RIGHT) maxOf(dockEnd, pillSide) else 0.dp)
 
-        Box(modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).onSizeChanged { container = it }) {
-            InkCanvasHost(vm, Modifier.fillMaxSize(), pillAlignment, scrubberAlignment)
+        Box(
+            modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.systemBars)
+                .background(Warm.Backdrop)
+                .onSizeChanged { container = it }
+        ) {
+            InkCanvasHost(
+                vm,
+                Modifier.padding(start = dockStart, end = dockEnd, top = chromeTop + dockTop, bottom = dockBottom)
+            )
 
             AnimatedVisibility(
                 visible = topBarVisible,
-                modifier = Modifier.align(Alignment.TopCenter),
+                modifier = Modifier.align(Alignment.TopCenter).zIndex(10f),
                 enter = slideInVertically { -it } + fadeIn(),
                 exit = slideOutVertically { -it } + fadeOut()
             ) {
@@ -140,20 +174,33 @@ fun WorkspaceScreen(
                     saveStatus = saveStatus,
                     recorderStatus = recorder.status,
                     splitActive = splitActive,
+                    readMode = readMode,
+                    holdToSnap = prefs.holdToSnapEnabled,
                     onBack = { vm.flushAsync(); onBack() },
                     onToggleStar = vm::toggleStarCurrentPage,
+                    onAddPage = { vm.addPageAfterCurrent() },
+                    onCropSnippet = {
+                        val crop = onCropSnippet
+                        if (crop != null) crop() else scope.launch {
+                            snackbar.currentSnackbarData?.dismiss()
+                            snackbar.showSnackbar("Open split-screen to crop a snippet into the other pane.", duration = SnackbarDuration.Short)
+                        }
+                    },
                     onTemplateSettings = { showTemplates = true },
                     onAudio = { showAudio = !showAudio },
                     onToggleSplit = onToggleSplit,
-                    onExport = { showExport = true },
-                    readMode = readMode,
                     onToggleRead = vm::toggleReadMode,
+                    onToggleHoldToSnap = { vm.userPrefs.setHoldToSnap(!prefs.holdToSnapEnabled) },
+                    onOpenLayers = { showLayers = true },
+                    onDuplicatePage = vm::duplicateCurrentPage,
+                    onDeletePage = { confirmDeletePage = true },
+                    onExport = { showExport = true },
                     onCollapse = { topBarVisible = false }
                 )
             }
             if (!topBarVisible) {
                 // Top-right, never top-centre: HyperOS puts its multitasking dots there.
-                TopBarRevealTab({ topBarVisible = true }, Modifier.align(Alignment.TopEnd).padding(end = 16.dp))
+                TopBarRevealTab({ topBarVisible = true }, Modifier.align(Alignment.TopEnd).padding(end = 16.dp + barEnd).zIndex(10f))
             }
 
             if (showAudio) {
@@ -162,15 +209,27 @@ fun WorkspaceScreen(
                     onClose = { showAudio = false },
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = if (topBarVisible) 64.dp else 12.dp, start = 12.dp, end = 12.dp)
+                        .zIndex(25f)
+                        .padding(
+                            top = chromeTop + dockTop + 8.dp,
+                            start = 12.dp + barStart,
+                            end = 12.dp + barEnd
+                        )
                 )
             }
 
-            // Lasso bar follows the selection's on-screen bounding box.
+            // Lasso bar follows the selection's on-screen bounding box, mapped from canvas space into this Box.
             val sel = selection
             if (sel != null && sel.count > 0 && container.width > 0) {
-                val anchor = remember(sel, viewport) { selectionScreenRect(sel.boundsMm, viewport) }
-                LassoContextBar(vm, anchor, container)
+                val offsetPx = androidx.compose.ui.geometry.Offset(dockStart.value * density, (chromeTop + dockTop).value * density)
+                val anchor = remember(sel, viewport, offsetPx) { selectionScreenRect(sel.boundsMm, viewport).translate(offsetPx) }
+                val safe = Rect(
+                    left = barStart.value * density,
+                    top = (chromeTop + dockTop).value * density,
+                    right = container.width - barEnd.value * density,
+                    bottom = container.height - dockBottom.value * density
+                )
+                LassoContextBar(vm, anchor, container, safeCanvasRectPx = safe)
             }
 
             FloatingPenDock(
@@ -178,14 +237,16 @@ fun WorkspaceScreen(
                 onOpenPenStudio = { studioSlot = it },
                 onOpenStencils = { showStencils = true },
                 onOpenLayers = { showLayers = true },
-                modifier = Modifier.padding(top = if (edge == DockEdge.TOP && topBarVisible) 72.dp else 0.dp)
+                onOpenAudioPin = { showAudio = true },
+                onOpenTextBox = { showTextBox = true },
+                modifier = Modifier.padding(top = chromeTop).zIndex(20f)
             )
 
             SnackbarHost(
                 hostState = snackbar,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = if (edge == DockEdge.BOTTOM) 120.dp else 24.dp)
+                    .padding(bottom = if (edge == DockEdge.BOTTOM) 72.dp else 24.dp)
             ) { data ->
                 Snackbar(
                     snackbarData = data,
@@ -200,9 +261,47 @@ fun WorkspaceScreen(
             studioSlot?.let { slot -> PenStudioModal(vm, slot) { studioSlot = null } }
             if (showTemplates) TemplatePickerDialog(vm) { showTemplates = false }
             if (showExport) ExportModal(vm) { showExport = false }
+            if (showTextBox) {
+                TextBoxDialog(
+                    onDismiss = { showTextBox = false },
+                    onConfirm = { text -> vm.addTextBox(text); showTextBox = false }
+                )
+            }
+            if (confirmDeletePage) {
+                AlertDialog(
+                    onDismissRequest = { confirmDeletePage = false },
+                    title = { Text("Delete this page?") },
+                    text = { Text("Page ${pageIndex + 1} and everything on it will be removed.") },
+                    confirmButton = {
+                        TextButton(onClick = { confirmDeletePage = false; vm.deleteCurrentPage() }) { Text("Delete", color = Warm.Danger) }
+                    },
+                    dismissButton = { TextButton(onClick = { confirmDeletePage = false }) { Text("Cancel") } }
+                )
+            }
             overlay()
         }
     }
+}
+
+/** Asks for the text of a new text box. */
+@Composable
+private fun TextBoxDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Text box") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                placeholder = { Text("Type here (Markdown works: # heading, **bold**, - bullet)") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3
+            )
+        },
+        confirmButton = { TextButton(enabled = text.isNotBlank(), onClick = { onConfirm(text) }) { Text("Add") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 private fun selectionScreenRect(b: com.omninote.pro.core.model.StrokeBounds, vp: com.omninote.pro.engine.input.ViewportTransform): Rect {

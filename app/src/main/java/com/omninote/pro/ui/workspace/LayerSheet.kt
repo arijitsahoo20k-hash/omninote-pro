@@ -111,16 +111,16 @@ fun LayerSheet(vm: WorkspaceViewModel, onDismiss: () -> Unit) {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .background(if (isActive) Warm.AccentSoft else Color(0x14FFF1DC), shape)
+                        .background(if (isActive) Warm.AccentSoft else Color(0x14CBD5E1), shape)
                         .border(1.dp, if (isActive) Warm.Accent else Color.Transparent, shape)
                         .clickable { vm.setActiveLayer(layer.id) }
                         .padding(10.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
-                            Modifier.background(if (isActive) Warm.Accent else Color(0x33FFF1DC), RoundedCornerShape(8.dp)).padding(horizontal = 7.dp, vertical = 3.dp)
+                            Modifier.background(if (isActive) Warm.Accent else Color(0x33CBD5E1), RoundedCornerShape(8.dp)).padding(horizontal = 7.dp, vertical = 3.dp)
                         ) {
-                            Text("L$number", color = if (isActive) Color(0xFF2A1A10) else Warm.Text, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("L$number", color = if (isActive) Color(0xFFFFFFFF) else Warm.Text, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                         Box(Modifier.width(10.dp))
                         if (renaming == layer.id) {

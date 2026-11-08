@@ -19,6 +19,7 @@ import android.text.style.AbsoluteSizeSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.util.LruCache
+import com.omninote.pro.core.model.AudioClipElement
 import com.omninote.pro.core.model.ImageElement
 import com.omninote.pro.core.model.StencilInstance
 import com.omninote.pro.core.model.TextBoxElement
@@ -293,5 +294,98 @@ class TextBoxPainter {
     private companion object {
         const val SCALE = 10f
         const val MM_PER_PT = 25.4f / 72f
+    }
+}
+
+
+/**
+ * Draws a voice-note pin as a rounded pill badge: a round play / pause button, the title and the duration.
+ * While the clip plays ([InkRenderContext.playingAudioClipId]) the pill gets a soft blue glow and a pause glyph.
+ * Everything is laid out at 10x scale (like [TextBoxPainter]) so text metrics stay precise at millimetre sizes.
+ */
+class AudioPinPainter {
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val text = TextPaint(Paint.ANTI_ALIAS_FLAG)
+    private val rect = RectF()
+    private val glyph = Path()
+
+    fun draw(canvas: Canvas, clip: AudioClipElement, ctx: InkRenderContext) {
+        val playing = !ctx.isExport && ctx.playingAudioClipId == clip.id
+        val b = clip.spatialBounds
+        canvas.save()
+        canvas.translate(b.left, b.top)
+        canvas.scale(1f / S, 1f / S)
+        val w = AudioClipElement.PIN_WIDTH_MM * S
+        val h = AudioClipElement.PIN_HEIGHT_MM * S
+        val r = h / 2f
+
+        if (playing) {
+            for (i in 3 downTo 1) {
+                fill.style = Paint.Style.FILL
+                fill.color = ACCENT or ((0x16 + (4 - i) * 0x0C) shl 24)
+                val pad = i * 0.7f * S
+                rect.set(-pad, -pad, w + pad, h + pad)
+                canvas.drawRoundRect(rect, r + pad, r + pad, fill)
+            }
+        }
+        // body
+        fill.style = Paint.Style.FILL
+        fill.color = if (ctx.isExport) 0xFFEFF3FA.toInt() else 0xFF1B2A48.toInt()
+        rect.set(0f, 0f, w, h)
+        canvas.drawRoundRect(rect, r, r, fill)
+        stroke.color = if (playing) ACCENT else 0x663B82F6
+        stroke.strokeWidth = 0.35f * S
+        rect.set(0.18f * S, 0.18f * S, w - 0.18f * S, h - 0.18f * S)
+        canvas.drawRoundRect(rect, r, r, stroke)
+
+        // round button
+        val cx = r
+        val cy = h / 2f
+        fill.color = ACCENT
+        canvas.drawCircle(cx, cy, r * 0.74f, fill)
+        fill.color = 0xFFFFFFFF.toInt()
+        glyph.reset()
+        if (playing) {
+            val bw = r * 0.16f
+            val bh = r * 0.52f
+            canvas.drawRect(cx - bw * 1.9f, cy - bh, cx - bw * 0.5f, cy + bh, fill)
+            canvas.drawRect(cx + bw * 0.5f, cy - bh, cx + bw * 1.9f, cy + bh, fill)
+        } else {
+            glyph.moveTo(cx - r * 0.18f, cy - r * 0.38f)
+            glyph.lineTo(cx + r * 0.42f, cy)
+            glyph.lineTo(cx - r * 0.18f, cy + r * 0.38f)
+            glyph.close()
+            canvas.drawPath(glyph, fill)
+        }
+
+        // title and duration
+        val textLeft = r * 2f + 0.5f * S
+        val durationText = formatDuration(clip.durationMs)
+        text.typeface = Typeface.DEFAULT_BOLD
+        text.textSize = 2.9f * S
+        val durW = text.measureText(durationText)
+        text.color = if (ctx.isExport) 0xFF4A5568.toInt() else 0xFFB7C4DB.toInt()
+        canvas.drawText(durationText, w - durW - 1.6f * S, cy + 1.0f * S, text)
+        val room = (w - textLeft - durW - 2.6f * S).coerceAtLeast(1f)
+        text.color = if (ctx.isExport) 0xFF1B2A48.toInt() else 0xFFFFFFFF.toInt()
+        val shown = android.text.TextUtils.ellipsize(clip.title, text, room, android.text.TextUtils.TruncateAt.END).toString()
+        canvas.drawText(shown, textLeft, cy + 1.0f * S, text)
+        canvas.restore()
+    }
+
+    companion object {
+        private const val S = 10f
+        private const val ACCENT = 0xFF3B82F6.toInt()
+
+        /** "0:42" / "12:05" / "1:02:09". */
+        fun formatDuration(ms: Long): String {
+            val total = (ms / 1000L).coerceAtLeast(0L)
+            val h = total / 3600L
+            val m = (total % 3600L) / 60L
+            val s = total % 60L
+            return if (h > 0) String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s)
+            else String.format(java.util.Locale.US, "%d:%02d", m, s)
+        }
     }
 }

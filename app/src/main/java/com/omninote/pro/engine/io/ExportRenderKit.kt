@@ -4,6 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import com.omninote.pro.core.model.CanvasMode
+import com.omninote.pro.core.model.NotebookPage
+import com.omninote.pro.core.model.StrokeBounds
+import com.omninote.pro.data.NotebookDao
 import com.omninote.pro.engine.ink.DryLayerRenderer
 import com.omninote.pro.engine.ink.ImageBitmapProvider
 import com.omninote.pro.engine.ink.ImagePainter
@@ -62,8 +66,13 @@ class SyncImageBitmapProvider(
  */
 class ExportRenderKit(
     private val context: Context,
-    private val stencilGeometry: StencilGeometryProvider
+    private val stencilGeometry: StencilGeometryProvider,
+    private val notebookDao: NotebookDao? = null
 ) {
+    /** True when the notebook is an infinite canvas (its pages have no sheet edge). */
+    suspend fun isInfiniteCanvas(notebookId: String): Boolean =
+        notebookDao?.getById(notebookId)?.canvasMode == CanvasMode.INFINITE.name
+
     val filesDir: File get() = context.filesDir
     val cacheDir: File get() = context.cacheDir
 
@@ -81,4 +90,37 @@ class ExportRenderKit(
     }
 
     fun pdfFile(notebookId: String): File = File(File(context.filesDir, "pdfs"), "$notebookId.pdf")
+}
+
+/** Padding added on every side of the content when an export is framed around it. */
+const val SMART_EXPORT_PADDING_MM = 15f
+private const val A4_WIDTH_MM = 210f
+private const val A4_HEIGHT_MM = 297f
+
+/**
+ * The area an export should cover, in page millimetres (the page's own y-down space; may be negative).
+ *
+ *  - Infinite canvas: the union of everything on the visible layers (strokes, shapes, stencils, images, text boxes and
+ *    voice-note pins) plus [SMART_EXPORT_PADDING_MM] on each side; an A4 sheet when the canvas is blank.
+ *  - Paginated page: the page rectangle, unless content spilled outside it, in which case the padded union (so nothing
+ *    is cut off).
+ */
+fun computeSmartExportBoundsMm(page: NotebookPage, isInfinite: Boolean): StrokeBounds {
+    var union: StrokeBounds? = null
+    for (layer in page.visibleLayers) {
+        for (e in layer.allElements()) {
+            val b = e.spatialBounds
+            union = union?.union(b) ?: b
+        }
+    }
+    val pageRect = StrokeBounds(0f, 0f, page.widthMm, page.heightMm)
+    val u = union ?: return if (isInfinite) StrokeBounds(0f, 0f, A4_WIDTH_MM, A4_HEIGHT_MM) else pageRect
+    val spilled = u.left < 0f || u.top < 0f || u.right > page.widthMm || u.bottom > page.heightMm
+    if (!isInfinite && !spilled) return pageRect
+    return StrokeBounds(
+        u.left - SMART_EXPORT_PADDING_MM,
+        u.top - SMART_EXPORT_PADDING_MM,
+        u.right + SMART_EXPORT_PADDING_MM,
+        u.bottom + SMART_EXPORT_PADDING_MM
+    )
 }

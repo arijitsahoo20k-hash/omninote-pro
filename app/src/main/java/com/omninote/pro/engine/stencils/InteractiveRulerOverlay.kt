@@ -619,11 +619,11 @@ class InteractiveRulerOverlay(
     private fun drawRotateKnob(canvas: Canvas, cx: Float, cy: Float, dark: Boolean, px: Float) {
         val r = knobRadius(px)
         fillPaint.style = Paint.Style.FILL
-        fillPaint.color = 0xFFD9845B.toInt()
+        fillPaint.color = 0xFF3B82F6.toInt()
         canvas.drawCircle(cx, cy, r, fillPaint)
         linePaint.style = Paint.Style.STROKE
         linePaint.strokeWidth = 1.6f * px
-        linePaint.color = if (dark) 0xFFFFF1DC.toInt() else 0xFFFFFFFF.toInt()
+        linePaint.color = if (dark) 0xFFCBD5E1.toInt() else 0xFFFFFFFF.toInt()
         rect.set(cx - r * 0.55f, cy - r * 0.55f, cx + r * 0.55f, cy + r * 0.55f)
         canvas.drawArc(rect, 30f, 290f, false, linePaint)
         // arrow head at the arc's open end
@@ -646,7 +646,7 @@ class InteractiveRulerOverlay(
         linePaint.style = Paint.Style.STROKE
         linePaint.strokeWidth = 1.8f * px
         linePaint.strokeCap = Paint.Cap.ROUND
-        linePaint.color = 0xFFFFF1DC.toInt()
+        linePaint.color = 0xFFCBD5E1.toInt()
         val k = r * 0.38f
         canvas.drawLine(cx - k, cy - k, cx + k, cy + k, linePaint)
         canvas.drawLine(cx - k, cy + k, cx + k, cy - k, linePaint)

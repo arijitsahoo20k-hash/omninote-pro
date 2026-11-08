@@ -96,6 +96,14 @@ class PdfTileManager(
     @Volatile
     private var wantedTiles: Set<TileKey> = emptySet()
 
+    /**
+     * True while a pinch or pan is in progress (and for a short moment after). The tile tier is suppressed then:
+     * only the cached full-page bitmap is drawn and no new high-DPI render jobs are started, which keeps zooming
+     * smooth. The host clears it ~120 ms after the gesture settles and redraws.
+     */
+    @Volatile
+    var gestureActive: Boolean = false
+
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val dest = RectF()
     private val src = Rect()
@@ -133,6 +141,7 @@ class PdfTileManager(
             cancelTilesNotIn(emptySet())
             return
         }
+        if (gestureActive) return // Tier 1 only while the user is pinching or panning.
         drawTiles(canvas, page, doc, pdfIndex, viewportMm, pxPerMm, zoom)
     }
 
