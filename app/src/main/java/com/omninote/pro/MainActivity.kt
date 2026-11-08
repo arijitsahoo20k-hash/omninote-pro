@@ -137,7 +137,7 @@ class MainActivity : ComponentActivity() {
         val g = graph
         var route by remember { mutableStateOf<Route>(Route.Library) }
         var showSettings by remember { mutableStateOf(false) }
-        var launching by remember { androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) } }
+        var launching by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
 
         // An external file was opened: make sure the library (which shows import progress and opens the result) is visible.
         val request = showLibraryRequest
