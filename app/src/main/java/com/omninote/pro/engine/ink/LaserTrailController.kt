@@ -11,8 +11,8 @@ import kotlin.math.min
 /**
  * Transient laser pointer. Nothing here is ever committed to the page or the undo stack.
  *
- * Timeline after the pen lifts: the trail stays fully visible for [HOLD_MS] (1000ms), then fades linearly over
- * `laserFadeMs - HOLD_MS` (default 800ms). While the pen is down the trail is fully visible; in PERSISTENCE_TRAIL
+ * Timeline after the pen lifts: in trail mode the trail fades linearly over [TRAIL_FADE_MS] (1.2 s); in dot mode the
+ * dot disappears at once. While the pen is down the trail is fully visible; in PERSISTENCE_TRAIL
  * mode older samples also fade by age so the trail has a comet-like tail, in GLOWING_DOT mode only the tip shows.
  *
  * Thread model: [begin]/[add]/[end] are called on the UI thread, [draw] on the render thread; state is guarded by
@@ -143,10 +143,10 @@ class LaserTrailController {
     private fun globalAlphaLocked(nowMs: Long): Float {
         if (count == 0) return 0f
         if (penDown) return 1f
+        // Dot mode only exists while the pen touches; trail mode fades out over TRAIL_FADE_MS right after the lift.
+        if (brush.laserMode == LaserMode.GLOWING_DOT) return 0f
         val sinceLift = nowMs - liftedAtMs
-        if (sinceLift <= HOLD_MS) return 1f
-        val fade = max(1L, brush.laserFadeMs - HOLD_MS)
-        return (1f - (sinceLift - HOLD_MS).toFloat() / fade).coerceIn(0f, 1f)
+        return (1f - sinceLift.toFloat() / TRAIL_FADE_MS).coerceIn(0f, 1f)
     }
 
     private fun append(x: Float, y: Float, nowMs: Long) {
@@ -166,7 +166,8 @@ class LaserTrailController {
     }
 
     companion object {
-        const val HOLD_MS = 1000L
+        const val HOLD_MS = 0L
+        const val TRAIL_FADE_MS = 1200L
         private const val TAIL_MS = 700L
         private const val BANDS = 12
         private const val MIN_DOT_RADIUS_MM = 1.2f

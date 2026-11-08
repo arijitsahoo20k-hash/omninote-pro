@@ -18,6 +18,7 @@ import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.VerticalSplit
 import androidx.compose.material3.Icon
@@ -52,6 +53,8 @@ fun WorkspaceTopBar(
     onAudio: () -> Unit,
     onToggleSplit: () -> Unit,
     onExport: () -> Unit,
+    readMode: Boolean,
+    onToggleRead: () -> Unit,
     onCollapse: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -94,6 +97,9 @@ fun WorkspaceTopBar(
                 if (isStarred) "Unstar page" else "Star page",
                 tint = if (isStarred) Warm.Warn else Warm.Text
             )
+        }
+        ToolButton(selected = readMode, onClick = onToggleRead) {
+            Icon(Icons.Rounded.SwapVert, if (readMode) "Leave read mode" else "Read / scroll mode", tint = if (readMode) Warm.Accent else Warm.Text)
         }
         ToolButton(selected = false, onClick = onTemplateSettings) {
             Icon(Icons.Rounded.GridOn, "Page template", tint = Warm.Text)

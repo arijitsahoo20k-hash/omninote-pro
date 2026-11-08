@@ -99,6 +99,7 @@ class PalmRejectionArbitrator(
     private var stylusDown = false
     private var lastStylusActivityMs = Long.MIN_VALUE / 4
     private var rejectSequence = false
+    private var lastHoverMs = Long.MIN_VALUE / 4
 
     // ---- finger sequence state ----
     private var gestureActive = false
@@ -173,14 +174,32 @@ class PalmRejectionArbitrator(
 
     fun onTouchEvent(event: MotionEvent): InputRouting {
         val stylusIndex = findStylusIndex(event)
-        return if (stylusIndex >= 0) routeStylus(event, stylusIndex) else routeFingers(event)
+        val routing = if (stylusIndex >= 0) routeStylus(event, stylusIndex) else routeFingers(event)
+        val action = event.actionMasked
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) cleanUpAfterSequence(event, action)
+        return routing
+    }
+
+    /** Whatever happened in the sequence, nothing may stay "down" once every pointer is gone. */
+    private fun cleanUpAfterSequence(event: MotionEvent, action: Int) {
+        stylusDown = false
+        rejectSequence = false
+        if (action == MotionEvent.ACTION_CANCEL) {
+            abortGesture()
+        } else if (gestureActive && maxFingers == 0) {
+            resetGesture()
+        }
+        lastStylusActivityMs = if (isInkTool(event.getToolType(0))) event.eventTime else lastStylusActivityMs
     }
 
     /** Returns true if the hover came from a stylus (and was tracked). */
     fun onHoverEvent(event: MotionEvent): Boolean {
         if (event.pointerCount == 0 || !isInkTool(event.getToolType(0))) return false
         when (event.actionMasked) {
-            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> isStylusHovering = true
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                isStylusHovering = true
+                lastHoverMs = event.eventTime
+            }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 isStylusHovering = false
                 lastStylusActivityMs = event.eventTime
@@ -208,6 +227,22 @@ class PalmRejectionArbitrator(
     private fun routeStylus(event: MotionEvent, stylusIndex: Int): InputRouting {
         val action = event.actionMasked
         val now = event.eventTime
+
+        // Unconditional pre-emption: a pen or eraser touching down always wins, whatever finger state is left over.
+        if ((action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) &&
+            isInkTool(event.getToolType(event.actionIndex))
+        ) {
+            cancelFling()
+            if (gestureActive) abortGesture()
+            resetGesture()
+            rejectSequence = false
+            stylusDown = true
+            lastStylusActivityMs = now
+            return InputRouting.Ink(
+                pointerIndex = event.actionIndex,
+                isEraser = event.getToolType(event.actionIndex) == MotionEvent.TOOL_TYPE_ERASER
+            )
+        }
 
         if (!stylusDown) {
             stylusDown = true
@@ -474,8 +509,11 @@ class PalmRejectionArbitrator(
     // Helpers
     // =====================================================================================
 
-    private fun isLocked(now: Long): Boolean =
-        isStylusHovering || now - lastStylusActivityMs < config.cooldownMs
+    private fun isLocked(now: Long): Boolean {
+        // A missed HOVER_EXIT must not lock fingers out forever: a hover that has been silent for a while is stale.
+        if (isStylusHovering && now - lastHoverMs > HOVER_STALE_MS) isStylusHovering = false
+        return isStylusHovering || now - lastStylusActivityMs < config.cooldownMs
+    }
 
     private fun beginSequence(event: MotionEvent) {
         resetGesture()
@@ -574,6 +612,7 @@ class PalmRejectionArbitrator(
     }
 
     private companion object {
+        const val HOVER_STALE_MS = 2000L
         const val COMMAND_BUFFER = 64
         const val MAX_POINTER_ID = 32
         const val MAX_ACTIVE = 16

@@ -6,6 +6,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -232,69 +237,260 @@ internal fun NewNotebookDialog(folderId: String?, onCreate: (NewNotebookSpec) ->
     var spread by remember { mutableStateOf(false) }
     var type by remember { mutableStateOf(TemplateType.RULED) }
     var paper by remember { mutableStateOf(PaperColor.WARM_IVORY) }
+    var spacing by remember { mutableStateOf(TemplateConfig().lineSpacingMm) }
+    val renderer = remember { com.omninote.pro.engine.template.ProceduralTemplateRenderer() }
+    val config = TemplateConfig(type = type, paperColor = paper, lineSpacingMm = spacing)
 
-    LibraryDialog(onDismiss, maxWidth = 600.dp) {
-        DialogTitle("New notebook")
-        Column(Modifier.verticalScroll(rememberScrollState()).height(440.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            TextInput(title, "Title, e.g. Rotational Motion") { title = it }
-
-            SectionLabel("Cover")
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                for (c in CoverColors) Swatch(c, c == cover) { cover = c }
-            }
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                for (c in CoverAccents) Swatch(c, c == accent) { accent = c }
-            }
-
-            SectionLabel("Canvas")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ChipButton("Paginated", canvasMode == CanvasMode.PAGINATED, { canvasMode = CanvasMode.PAGINATED })
-                ChipButton("Infinite", canvasMode == CanvasMode.INFINITE, { canvasMode = CanvasMode.INFINITE })
-            }
-            SectionLabel("Scroll direction")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ChipButton("Vertical", axis == PageScrollAxis.VERTICAL, { axis = PageScrollAxis.VERTICAL })
-                ChipButton("Horizontal", axis == PageScrollAxis.HORIZONTAL, { axis = PageScrollAxis.HORIZONTAL })
-            }
-            LabeledSwitch("Two-page spread", spread, { spread = it })
-
-            SectionLabel("Starting template")
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (t in TemplateType.values()) ChipButton(t.label, type == t, { type = t })
-            }
-            SectionLabel("Paper")
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                for (p in PaperColor.values()) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { paper = p }) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        WorkspaceTheme {
+            BoxWithConstraints(
+                Modifier
+                    .widthIn(max = 940.dp)
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .glass(RoundedCornerShape(26.dp), raised = true, elevation = 22.dp)
+                    .padding(18.dp)
+            ) {
+                val twoColumn = maxWidth >= 640.dp
+                val preview: @Composable (Modifier) -> Unit = { m ->
+                    Column(m, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SectionLabel("Live preview")
+                        // Cover with the typed title.
                         Box(
                             Modifier
-                                .size(36.dp)
-                                .background(Color(p.argb), RoundedCornerShape(10.dp))
-                                .border(if (p == paper) 3.dp else 1.dp, if (p == paper) Warm.Accent else Warm.GlassEdge, RoundedCornerShape(10.dp))
+                                .height(150.dp)
+                                .aspectRatio(0.78f)
+                                .background(Color(cover), RoundedCornerShape(12.dp))
+                                .border(1.dp, Warm.GlassEdge, RoundedCornerShape(12.dp))
+                        ) {
+                            Box(
+                                Modifier
+                                    .align(Alignment.CenterStart)
+                                    .fillMaxHeight()
+                                    .width(12.dp)
+                                    .background(Color(accent), RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp))
+                            )
+                            Text(
+                                title.ifBlank { "Untitled" },
+                                color = if (title.isBlank()) Color(0x99FFF1DC) else Color(0xFFFFF1DC),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 4,
+                                modifier = Modifier.align(Alignment.Center).padding(start = 22.dp, end = 10.dp)
+                            )
+                            Box(
+                                Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(start = 22.dp, bottom = 12.dp)
+                                    .height(3.dp)
+                                    .width(36.dp)
+                                    .background(Color(accent), RoundedCornerShape(2.dp))
+                            )
+                        }
+                        // The real page template at the page's aspect ratio.
+                        Box(
+                            Modifier
+                                .fillMaxWidth(0.8f)
+                                .aspectRatio(com.omninote.pro.core.model.NotebookPage.A4_WIDTH_MM / com.omninote.pro.core.model.NotebookPage.A4_HEIGHT_MM)
+                                .border(1.dp, Warm.GlassEdge, RoundedCornerShape(4.dp))
+                        ) {
+                            com.omninote.pro.ui.workspace.TemplatePreview(
+                                renderer, config,
+                                com.omninote.pro.core.model.NotebookPage.A4_WIDTH_MM,
+                                com.omninote.pro.core.model.NotebookPage.A4_HEIGHT_MM,
+                                Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                }
+                val options: @Composable (Modifier) -> Unit = { m ->
+                    Column(m, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextInput(title, "Title, e.g. Rotational Motion") { title = it }
+
+                        SectionLabel("Cover colour")
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (c in CoverColors) CoverCard(c, accent, c == cover) { cover = c }
+                        }
+                        SectionLabel("Cover accent")
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (c in CoverAccents) Swatch(c, c == accent) { accent = c }
+                        }
+
+                        SectionLabel("Paper colour")
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (p in PaperColor.values()) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { paper = p }) {
+                                    Box(
+                                        Modifier
+                                            .size(38.dp)
+                                            .background(Color(p.argb), RoundedCornerShape(10.dp))
+                                            .border(if (p == paper) 3.dp else 1.dp, if (p == paper) Warm.Accent else Warm.GlassEdge, RoundedCornerShape(10.dp))
+                                    )
+                                    Text(p.label, color = if (p == paper) Warm.Text else Warm.TextMuted, fontSize = 10.sp, maxLines = 1)
+                                }
+                            }
+                        }
+
+                        SectionLabel("Template")
+                        for (row in TemplateType.values().toList().chunked(4)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                for (t in row) {
+                                    val sel = t == type
+                                    Column(
+                                        Modifier
+                                            .weight(1f)
+                                            .background(if (sel) Warm.AccentSoft else Color(0x14FFF1DC), RoundedCornerShape(12.dp))
+                                            .border(1.dp, if (sel) Warm.Accent else Color.Transparent, RoundedCornerShape(12.dp))
+                                            .clickable { type = t }
+                                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        TemplateGlyph(t, if (sel) Warm.Accent else Warm.Text)
+                                        Text(
+                                            shortTemplateName(t),
+                                            color = if (sel) Warm.Text else Warm.TextMuted,
+                                            fontSize = 10.sp, maxLines = 2, textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                                repeat(4 - row.size) { Box(Modifier.weight(1f)) }
+                            }
+                        }
+
+                        com.omninote.pro.ui.workspace.LabeledSlider(
+                            "Line / grid spacing", spacing, TemplateConfig.MIN_SPACING_MM..TemplateConfig.MAX_SPACING_MM,
+                            String.format(java.util.Locale.US, "%.1f mm", spacing),
+                            onChange = { spacing = it }
                         )
-                        Text(p.label, color = if (p == paper) Warm.Text else Warm.TextMuted, fontSize = 10.sp, maxLines = 1)
+
+                        SectionLabel("Canvas")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ChipButton("Paginated", canvasMode == CanvasMode.PAGINATED, { canvasMode = CanvasMode.PAGINATED })
+                            ChipButton("Infinite", canvasMode == CanvasMode.INFINITE, { canvasMode = CanvasMode.INFINITE })
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ChipButton("Vertical", axis == PageScrollAxis.VERTICAL, { axis = PageScrollAxis.VERTICAL })
+                            ChipButton("Horizontal", axis == PageScrollAxis.HORIZONTAL, { axis = PageScrollAxis.HORIZONTAL })
+                        }
+                        LabeledSwitch("Two-page spread", spread, { spread = it })
+                    }
+                }
+
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    DialogTitle("New notebook")
+                    if (twoColumn) {
+                        Row(Modifier.fillMaxWidth().height(500.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                            preview(Modifier.weight(0.8f).fillMaxHeight().verticalScroll(rememberScrollState()))
+                            options(Modifier.weight(1.2f).fillMaxHeight().verticalScroll(rememberScrollState()))
+                        }
+                    } else {
+                        Column(Modifier.fillMaxWidth().height(520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            preview(Modifier.fillMaxWidth())
+                            options(Modifier.fillMaxWidth())
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                        ChipButton("Cancel", false, onDismiss)
+                        ChipButton("Create", true, {
+                            onCreate(
+                                NewNotebookSpec(
+                                    title = title,
+                                    coverColorArgb = cover,
+                                    coverAccentArgb = accent,
+                                    canvasMode = canvasMode,
+                                    scrollAxis = axis,
+                                    viewLayout = if (spread) PageViewLayout.TWO_PAGE_SPREAD else PageViewLayout.SINGLE_PAGE,
+                                    template = config,
+                                    folderId = folderId
+                                )
+                            )
+                            onDismiss()
+                        })
                     }
                 }
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-            ChipButton("Cancel", false, onDismiss)
-            ChipButton("Create", true, {
-                onCreate(
-                    NewNotebookSpec(
-                        title = title,
-                        coverColorArgb = cover,
-                        coverAccentArgb = accent,
-                        canvasMode = canvasMode,
-                        scrollAxis = axis,
-                        viewLayout = if (spread) PageViewLayout.TWO_PAGE_SPREAD else PageViewLayout.SINGLE_PAGE,
-                        template = TemplateConfig(type = type, paperColor = paper),
-                        folderId = folderId
-                    )
-                )
-                onDismiss()
-            })
+    }
+}
+
+private fun shortTemplateName(t: TemplateType): String = when (t) {
+    TemplateType.BLANK -> "Blank"
+    TemplateType.RULED -> "Ruled"
+    TemplateType.GRID -> "Grid"
+    TemplateType.DOTTED_GRID -> "Dotted"
+    TemplateType.CROSS_GRID -> "Cross"
+    TemplateType.HEXAGONAL -> "Hexagonal"
+    TemplateType.CORNELL -> "Cornell"
+    TemplateType.SPLIT_DERIVATION -> "Split"
+    TemplateType.ISOMETRIC -> "Isometric"
+    TemplateType.POLAR -> "Polar"
+    TemplateType.MISTAKE_LOG -> "Mistake log"
+    TemplateType.DAILY_PLANNER -> "Planner"
+}
+
+/** Tiny hand-drawn pictogram of each template, so the grid reads at a glance. */
+@Composable
+private fun TemplateGlyph(type: TemplateType, tint: Color) {
+    androidx.compose.foundation.Canvas(Modifier.size(34.dp)) {
+        val s = size.minDimension
+        val w = s * 0.045f
+        val c = tint.copy(alpha = 0.9f)
+        fun line(x1: Float, y1: Float, x2: Float, y2: Float) =
+            drawLine(c, androidx.compose.ui.geometry.Offset(x1 * s, y1 * s), androidx.compose.ui.geometry.Offset(x2 * s, y2 * s), w)
+        drawRoundRect(
+            c, androidx.compose.ui.geometry.Offset(s * 0.12f, s * 0.06f),
+            androidx.compose.ui.geometry.Size(s * 0.76f, s * 0.88f),
+            androidx.compose.ui.geometry.CornerRadius(s * 0.06f),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(w)
+        )
+        when (type) {
+            TemplateType.BLANK -> Unit
+            TemplateType.RULED -> for (i in 1..4) line(0.2f, 0.06f + i * 0.17f, 0.8f, 0.06f + i * 0.17f)
+            TemplateType.GRID -> {
+                for (i in 1..3) { line(0.12f + i * 0.19f, 0.1f, 0.12f + i * 0.19f, 0.9f); line(0.16f, 0.06f + i * 0.22f, 0.84f, 0.06f + i * 0.22f) }
+            }
+            TemplateType.DOTTED_GRID -> for (i in 1..3) for (j in 1..4) {
+                drawCircle(c, w * 0.8f, androidx.compose.ui.geometry.Offset((0.12f + i * 0.19f) * s, (0.06f + j * 0.17f) * s))
+            }
+            TemplateType.CROSS_GRID -> for (i in 1..3) for (j in 1..3) {
+                val x = 0.12f + i * 0.19f; val y = 0.06f + j * 0.22f
+                line(x - 0.04f, y, x + 0.04f, y); line(x, y - 0.04f, x, y + 0.04f)
+            }
+            TemplateType.HEXAGONAL -> {
+                val path = androidx.compose.ui.graphics.Path()
+                val r = s * 0.22f
+                for (k in 0 until 6) {
+                    val a = Math.toRadians(60.0 * k - 30.0)
+                    val x = s * 0.5f + r * Math.cos(a).toFloat(); val y = s * 0.5f + r * Math.sin(a).toFloat()
+                    if (k == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                path.close()
+                drawPath(path, c, style = androidx.compose.ui.graphics.drawscope.Stroke(w))
+            }
+            TemplateType.CORNELL -> { line(0.12f, 0.74f, 0.88f, 0.74f); line(0.38f, 0.06f, 0.38f, 0.74f) }
+            TemplateType.SPLIT_DERIVATION -> { line(0.5f, 0.06f, 0.5f, 0.94f); line(0.2f, 0.3f, 0.42f, 0.3f); line(0.58f, 0.3f, 0.8f, 0.3f) }
+            TemplateType.ISOMETRIC -> for (i in 0..3) { line(0.12f, 0.2f + i * 0.2f, 0.88f, 0.2f + i * 0.2f - 0.3f); line(0.12f, 0.2f + i * 0.2f - 0.3f, 0.88f, 0.2f + i * 0.2f) }
+            TemplateType.POLAR -> {
+                drawCircle(c, s * 0.12f, center, style = androidx.compose.ui.graphics.drawscope.Stroke(w))
+                drawCircle(c, s * 0.24f, center, style = androidx.compose.ui.graphics.drawscope.Stroke(w))
+                line(0.5f, 0.1f, 0.5f, 0.9f); line(0.16f, 0.5f, 0.84f, 0.5f)
+            }
+            TemplateType.MISTAKE_LOG -> { for (i in 1..4) line(0.12f, 0.06f + i * 0.17f, 0.88f, 0.06f + i * 0.17f); line(0.4f, 0.06f, 0.4f, 0.94f); line(0.64f, 0.06f, 0.64f, 0.94f) }
+            TemplateType.DAILY_PLANNER -> { for (i in 1..4) { line(0.28f, 0.06f + i * 0.17f, 0.82f, 0.06f + i * 0.17f); drawCircle(c, w, androidx.compose.ui.geometry.Offset(0.2f * s, (0.06f + i * 0.17f) * s)) } }
         }
+    }
+}
+
+@Composable
+private fun CoverCard(argb: Int, accent: Int, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(width = 42.dp, height = 56.dp)
+            .background(Color(argb), RoundedCornerShape(8.dp))
+            .border(if (selected) 3.dp else 1.dp, if (selected) Warm.Accent else Warm.GlassEdge, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Box(Modifier.align(Alignment.CenterStart).fillMaxHeight().width(6.dp).background(Color(accent), RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp)))
     }
 }
 

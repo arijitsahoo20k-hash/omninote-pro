@@ -12,6 +12,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.graphics.Color
+import kotlinx.coroutines.launch
+import com.omninote.pro.data.NewNotebookSpec
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -48,7 +56,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -91,12 +98,12 @@ fun SplitScreenHost(
     open: OpenNotebook,
     penRouter: PenKeyRouter,
     onExit: () -> Unit,
+    onCreateNotebook: suspend (NewNotebookSpec) -> String,
     modifier: Modifier = Modifier
 ) {
     var panes by remember { mutableStateOf(listOf(PaneSpec(UUID.randomUUID().toString(), open.notebookId, open.pageIndex))) }
     var ratio by remember { mutableFloatStateOf(0.5f) }
     var activeId by remember { mutableStateOf(panes.first().paneId) }
-    var showPicker by remember { mutableStateOf(false) }
     var cropSourceId by remember { mutableStateOf<String?>(null) }
     var cropAfterPick by remember { mutableStateOf<String?>(null) }
     val vmById = remember { mutableStateMapOf<String, WorkspaceViewModel>() }
@@ -114,9 +121,24 @@ fun SplitScreenHost(
         if (cropSourceId == id) cropSourceId = null
     }
 
-    BackHandler(enabled = panes.size > 1 && !showPicker) { closePane(activeId) }
+    /** Adds an empty right pane; it shows the notebook picker until something is chosen. */
+    fun addEmptyPane() {
+        val spec = PaneSpec(UUID.randomUUID().toString(), "", 0)
+        panes = (panes + spec).takeLast(2)
+        ratio = 0.5f
+    }
 
-    BoxWithConstraints(modifier.fillMaxSize().background(Warm.Scrim)) {
+    /** Swaps the notebook shown in one pane by giving it a fresh id (so it gets a fresh view-model). */
+    fun replacePane(oldId: String, notebookId: String, pageIndex: Int) {
+        val fresh = PaneSpec(UUID.randomUUID().toString(), notebookId, pageIndex)
+        panes = panes.map { if (it.paneId == oldId) fresh else it }
+        if (activeId == oldId) activeId = fresh.paneId
+        cropAfterPick?.let { if (notebookId.isNotEmpty()) { cropSourceId = it; cropAfterPick = null } }
+    }
+
+    BackHandler(enabled = panes.size > 1) { closePane(activeId) }
+
+    BoxWithConstraints(modifier.fillMaxSize().background(Warm.Scrim).windowInsetsPadding(WindowInsets.systemBars)) {
         val dividerWidth = 26.dp
         val containerWidth = maxWidth
         val totalPx = with(LocalDensity.current) { containerWidth.toPx() }
@@ -139,19 +161,32 @@ fun SplitScreenHost(
                                 }
                             }
                     ) {
-                        Pane(
+                        if (spec.notebookId.isEmpty()) {
+                            val leftPane = panes.firstOrNull { it.paneId != spec.paneId && it.notebookId.isNotEmpty() }
+                            RightPanePicker(
+                                deps = deps,
+                                sameNotebookId = leftPane?.notebookId,
+                                sameNotebookPage = leftPane?.let { (vmById[it.paneId]?.currentPageIndex?.value ?: it.pageIndex) + 1 } ?: 0,
+                                onPick = { nb, page -> replacePane(spec.paneId, nb, page) },
+                                onCreate = onCreateNotebook,
+                                onCancel = { cropAfterPick = null; closePane(spec.paneId) }
+                            )
+                        } else Pane(
                             deps = deps,
                             spec = spec,
                             split = split,
+                            canSwitch = split && i == 1,
+                            onSwitchNotebook = { replacePane(spec.paneId, "", 0) },
                             vmById = vmById,
                             cropActive = cropSourceId == spec.paneId,
                             otherId = panes.firstOrNull { it.paneId != spec.paneId }?.paneId,
                             onClose = { closePane(spec.paneId) },
                             onToggleSplit = {
-                                if (split) panes = panes.filter { it.paneId == activeId } else showPicker = true
+                                if (split) panes = panes.filter { it.paneId == activeId && it.notebookId.isNotEmpty() }.ifEmpty { panes.take(1) }
+                                else addEmptyPane()
                             },
                             onStartCrop = {
-                                if (split) cropSourceId = spec.paneId else { cropAfterPick = spec.paneId; showPicker = true }
+                                if (split) cropSourceId = spec.paneId else { cropAfterPick = spec.paneId; addEmptyPane() }
                             },
                             onEndCrop = { cropSourceId = null }
                         )
@@ -169,24 +204,6 @@ fun SplitScreenHost(
                 }
             }
         }
-
-        if (showPicker) {
-            val sourcePane = panes.firstOrNull { it.paneId == (cropAfterPick ?: activeId) } ?: panes.first()
-            PanePickerDialog(
-                deps = deps,
-                currentNotebookId = sourcePane.notebookId,
-                currentPageIndex = vmById[sourcePane.paneId]?.currentPageIndex?.value ?: sourcePane.pageIndex,
-                onPick = { notebookId, pageIndex ->
-                    val spec = PaneSpec(UUID.randomUUID().toString(), notebookId, pageIndex)
-                    panes = (panes + spec).takeLast(2)
-                    ratio = 0.5f
-                    cropAfterPick?.let { cropSourceId = it }
-                    cropAfterPick = null
-                    showPicker = false
-                },
-                onDismiss = { showPicker = false; cropAfterPick = null }
-            )
-        }
     }
 }
 
@@ -195,6 +212,8 @@ private fun Pane(
     deps: WorkspaceDependencies,
     spec: PaneSpec,
     split: Boolean,
+    canSwitch: Boolean,
+    onSwitchNotebook: () -> Unit,
     vmById: MutableMap<String, WorkspaceViewModel>,
     cropActive: Boolean,
     otherId: String?,
@@ -231,6 +250,17 @@ private fun Pane(
                         Icon(Icons.Rounded.Crop, "Crop question to other pane", tint = Warm.Accent)
                     }
                     Text("Crop", color = Warm.TextMuted, fontSize = 10.sp)
+                }
+            }
+            if (canSwitch) {
+                Column(
+                    Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = 110.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    ToolButton(selected = false, onClick = onSwitchNotebook, size = 46.dp) {
+                        Icon(Icons.Rounded.SwapHoriz, "Switch right pane notebook", tint = Warm.Accent)
+                    }
+                    Text("Switch", color = Warm.TextMuted, fontSize = 10.sp)
                 }
             }
             val other = otherId?.let { vmById[it] }
@@ -286,41 +316,52 @@ private fun Divider(
 
 private val Color0 = androidx.compose.ui.graphics.Color(0xFF14110F)
 
+/**
+ * Full-pane picker shown in the right half when it has no notebook yet (or after "Switch"): every existing notebook
+ * and PDF, the notebook on the left at a different page, or a brand-new notebook created right here.
+ */
 @Composable
-private fun PanePickerDialog(
+private fun RightPanePicker(
     deps: WorkspaceDependencies,
-    currentNotebookId: String,
-    currentPageIndex: Int,
+    sameNotebookId: String?,
+    sameNotebookPage: Int,
     onPick: (notebookId: String, pageIndex: Int) -> Unit,
-    onDismiss: () -> Unit
+    onCreate: suspend (NewNotebookSpec) -> String,
+    onCancel: () -> Unit
 ) {
     var notebooks by remember { mutableStateOf<List<NotebookEntity>?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     LaunchedEffect(Unit) { notebooks = deps.db.notebookDao().getAll().sortedByDescending { it.updatedAt } }
 
-    Dialog(onDismissRequest = onDismiss) {
-        WorkspaceTheme {
+    WorkspaceTheme {
+        Box(Modifier.fillMaxSize().background(Color0).padding(14.dp), contentAlignment = Alignment.TopCenter) {
             Column(
                 Modifier
-                    .widthIn(max = 480.dp)
-                    .fillMaxWidth()
-                    .glass(RoundedCornerShape(24.dp), raised = true, elevation = 20.dp)
+                    .widthIn(max = 560.dp)
+                    .fillMaxSize()
+                    .glass(RoundedCornerShape(24.dp), raised = true, elevation = 12.dp)
                     .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Open in the other pane", color = Warm.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ChipButton("Same notebook, next page", false, { onPick(currentNotebookId, currentPageIndex + 1) })
+                Text("Open in this pane", color = Warm.Text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("Pick a notebook or PDF, or start a new notebook.", color = Warm.TextMuted, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    if (sameNotebookId != null) {
+                        ChipButton("Same Notebook (Different Page)", false, { onPick(sameNotebookId, sameNotebookPage) })
+                    }
+                    ChipButton("+ Create New Notebook Here", true, { creating = true })
                 }
                 val list = notebooks
                 when {
                     list == null -> Text("Loading…", color = Warm.TextMuted, fontSize = 13.sp)
-                    list.isEmpty() -> Text("No notebooks yet.", color = Warm.TextMuted, fontSize = 13.sp)
-                    else -> LazyColumn(Modifier.height(320.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    list.isEmpty() -> Text("No notebooks yet. Create one above.", color = Warm.TextMuted, fontSize = 13.sp)
+                    else -> LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(list, key = { it.notebookId }) { nb ->
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .background(androidx.compose.ui.graphics.Color(0x14FFF1DC), RoundedCornerShape(14.dp))
+                                    .background(Color(0x14FFF1DC), RoundedCornerShape(14.dp))
                                     .clickable { onPick(nb.notebookId, 0) }
                                     .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -335,9 +376,17 @@ private fun PanePickerDialog(
                     }
                 }
                 Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    ChipButton("Cancel", false, onDismiss)
+                    ChipButton("Close pane", false, onCancel)
                 }
             }
         }
+    }
+
+    if (creating) {
+        com.omninote.pro.ui.library.NewNotebookDialog(
+            folderId = null,
+            onCreate = { spec -> scope.launch { runCatching { onCreate(spec) }.onSuccess { id -> onPick(id, 0) } } },
+            onDismiss = { creating = false }
+        )
     }
 }

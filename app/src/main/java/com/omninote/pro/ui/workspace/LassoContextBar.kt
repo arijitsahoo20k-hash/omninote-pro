@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.AlignHorizontalRight
 import androidx.compose.material.icons.rounded.AlignVerticalBottom
 import androidx.compose.material.icons.rounded.AlignVerticalCenter
 import androidx.compose.material.icons.rounded.AlignVerticalTop
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.ContentPaste
@@ -120,6 +121,8 @@ fun LassoContextBar(
             BarAction(Icons.Rounded.TextFields, "To text") { vm.convertSelectionToText(); panel = BarPanel.NONE }
             BarAction(Icons.Rounded.StickyNote2, "Sticker", selected = panel == BarPanel.STICKER) { panel = toggle(panel, BarPanel.STICKER) }
             BarAction(Icons.Rounded.IosShare, "Export", selected = panel == BarPanel.EXPORT) { panel = toggle(panel, BarPanel.EXPORT) }
+            BarDivider()
+            BarAction(Icons.Rounded.Check, "Done", tint = Warm.Accent) { panel = BarPanel.NONE; vm.lassoClear() }
         }
 
         if (panel != BarPanel.NONE) {

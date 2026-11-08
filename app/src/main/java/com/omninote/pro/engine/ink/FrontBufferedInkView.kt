@@ -2,16 +2,15 @@ package com.omninote.pro.engine.ink
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.BlendMode
+import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Paint
 import android.os.SystemClock
-import android.view.Choreographer
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.SurfaceView
-import androidx.graphics.lowlatency.CanvasFrontBufferedRenderer
+import android.view.View
 import androidx.input.motionprediction.MotionEventPredictor
 import com.omninote.pro.core.model.BrushConfig
 import com.omninote.pro.core.model.BrushType
@@ -88,7 +87,7 @@ class FrontBufferedInkView(
     stencilGeometry: StencilGeometryProvider,
     private val imageBitmaps: ImageBitmapProvider,
     var eraserHandler: EraserHandler = NoOpEraserHandler
-) : SurfaceView(context) {
+) : View(context) {
 
     // ---- public configuration ----
     var brush: BrushConfig = BrushConfig()
@@ -110,6 +109,23 @@ class FrontBufferedInkView(
      * also run. The workspace uses this for "tap a stroke to jump the audio".
      */
     var tapInterceptor: ((Float, Float) -> Boolean)? = null
+
+    /** Fired on the main thread whenever pan, zoom or rotation changes (gesture, fit, reset). Replaces host polling. */
+    var onViewportChanged: ((ViewportTransform) -> Unit)? = null
+
+    /** Fired whenever the Lasso selection or its frame changes (see [LassoController.onSelectionChanged]). */
+    var onSelectionChanged: (() -> Unit)? = null
+
+    /** Fired when the last pointer lifts (or the gesture is cancelled); the host uses it to turn a pulled page. */
+    var onTouchReleased: (() -> Unit)? = null
+
+    /** Highlights the whole canvas as a drop target while an image is dragged over it. */
+    var dropHighlight: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
 
     var fillMode: Boolean = false
 
@@ -136,6 +152,11 @@ class FrontBufferedInkView(
      * lasso tool) stylus input selects instead of drawing, and the selection frame takes handle drags.
      */
     var lasso: LassoController? = null
+        set(value) {
+            field?.onSelectionChanged = null
+            field = value
+            value?.onSelectionChanged = { onSelectionChanged?.invoke(); postInvalidateOnAnimation() }
+        }
 
     /** Ruler, protractor and compass; strokes starting at an instrument edge lock onto it. */
     var instruments: InteractiveRulerOverlay? = null
@@ -166,11 +187,29 @@ class FrontBufferedInkView(
     var audioPlaybackMs: Long = -1L
         private set
 
+    private var lastReplayRenderMs = -1L
+    private val replaySettleRunnable = Runnable { requestDry() }
+
     fun setAudioPlaybackMs(ms: Long?) {
         val v = ms ?: -1L
         if (v == audioPlaybackMs) return
+        val wasReplay = audioPlaybackMs >= 0L
         audioPlaybackMs = v
-        requestDry()
+        if (v < 0L || !wasReplay) {
+            removeCallbacks(replaySettleRunnable)
+            lastReplayRenderMs = v
+            requestDry()
+            return
+        }
+        // The replay ticker runs at 60 Hz but the page only needs ~15 re-renders a second; the final position is
+        // always rendered once the ticker goes quiet.
+        if (kotlin.math.abs(v - lastReplayRenderMs) >= REPLAY_STEP_MS) {
+            lastReplayRenderMs = v
+            requestDry()
+        } else {
+            removeCallbacks(replaySettleRunnable)
+            postDelayed(replaySettleRunnable, 120L)
+        }
     }
 
     private val _events = MutableSharedFlow<InkViewEvent>(extraBufferCapacity = 32)
@@ -213,28 +252,7 @@ class FrontBufferedInkView(
     private var tapDownY = 0f
     private var tapDownTime = 0L
 
-    // ---- render-thread state ----
-    private class FrontParam(
-        val viewport: ViewportTransform,
-        val paperDark: Boolean,
-        val smartInversion: Boolean,
-        val wetBrush: BrushConfig?,
-        val wetColor: Int,
-        val committed: PointArrays?,
-        val predicted: PointArrays?
-    )
-
-    private class DryState(
-        val page: NotebookPage,
-        val index: SpatialRTreeIndex,
-        val viewport: ViewportTransform,
-        val smartInversion: Boolean,
-        val audioPlaybackMs: Long
-    )
-
-    @Volatile
-    private var dryState: DryState? = null
-
+    // ---- render state (main thread only) ----
     @Volatile
     private var dryBackground: PageBackgroundPainter? = null
 
@@ -253,20 +271,31 @@ class FrontBufferedInkView(
     private val dryCtx = InkRenderContext()
     private val tmp = FloatArray(2)
 
-    private var renderer: CanvasFrontBufferedRenderer<FrontParam>? = null
-    private var loopRunning = false
-
-    private val frameCallback = Choreographer.FrameCallback {
-        loopRunning = false
-        if (laser.isActive || eraserOverlay.isActive || lasso?.isAnimating == true) {
-            pushOverlayFrame()
-            scheduleLoop()
-        }
+    // Cached dry layer: everything committed, rendered to a bitmap only when content changes or the viewport settles.
+    // Pan/zoom frames draw that bitmap through a transform (cheap, no content re-render), so the canvas can never stall
+    // waiting on a GPU front-buffer hand-over.
+    private var dryBitmap: Bitmap? = null
+    private var dryCanvas: Canvas? = null
+    private var dryViewport: ViewportTransform? = null
+    private var dryDirty = true
+    private var lastDryRenderMs = 0L
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val previewMatrix = Matrix()
+    private val inverseMatrix = Matrix()
+    private val settleRunnable = Runnable {
+        dryDirty = true
+        invalidate()
     }
+
+    private var wetPredicted: PointArrays? = null
+    private var gestureJob: kotlinx.coroutines.Job? = null
+    private val dropPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
 
     init {
         isFocusable = true
         isFocusableInTouchMode = true
+        setLayerType(LAYER_TYPE_HARDWARE, null)
+        setWillNotDraw(false)
     }
 
     // =====================================================================================
@@ -275,21 +304,28 @@ class FrontBufferedInkView(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        renderer = CanvasFrontBufferedRenderer(this, callback)
-        scope.launch { arbitrator.commands.collect { handleGesture(it) } }
+        gestureJob?.cancel()
+        gestureJob = scope.launch { arbitrator.commands.collect { handleGesture(it) } }
         requestDry()
     }
 
     override fun onDetachedFromWindow() {
         removeCallbacks(holdRunnable)
-        renderer?.release(true)
-        renderer = null
+        removeCallbacks(settleRunnable)
+        gestureJob?.cancel()
+        gestureJob = null
+        mode = Mode.NONE
         arbitrator.reset()
         penButtons.releaseAll()
         unbatcher.reset()
         laser.clear()
         eraserOverlay.clear()
         wetRenderer.clearCache()
+        dryBitmap?.recycle()
+        dryBitmap = null
+        dryCanvas = null
+        dryViewport = null
+        dryDirty = true
         super.onDetachedFromWindow()
     }
 
@@ -300,6 +336,10 @@ class FrontBufferedInkView(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        dryBitmap?.recycle()
+        dryBitmap = null
+        dryCanvas = null
+        dryViewport = null
         requestDry()
     }
 
@@ -347,9 +387,10 @@ class FrontBufferedInkView(
     fun eraserHost(): EraserHost = shapeEditHost()
 
     fun setViewport(newViewport: ViewportTransform) {
+        if (newViewport == viewport) return
         viewport = newViewport
-        requestDry()
-        if (overlaysVisible()) pushOverlayFrame()
+        invalidate()
+        onViewportChanged?.invoke(newViewport)
     }
 
     /** Requests one front-buffer frame (instrument or handle changes). */
@@ -365,60 +406,143 @@ class FrontBufferedInkView(
     }
 
     private fun requestDry() {
-        val p = page ?: return
-        val i = index ?: return
-        dryState = DryState(p, i, viewport, smartInversion, audioPlaybackMs)
-        renderer?.renderMultiBufferedLayer(listOf(FrontParam(viewport, false, smartInversion, null, 0, null, null)))
+        dryDirty = true
+        invalidate()
     }
 
     // =====================================================================================
-    // Render callbacks (render thread)
+    // Drawing (main thread, hardware accelerated)
     // =====================================================================================
 
-    private val callback = object : CanvasFrontBufferedRenderer.Callback<FrontParam> {
+    override fun onDraw(canvas: Canvas) {
+        val w = width
+        val h = height
+        if (w <= 0 || h <= 0) return
+        val now = SystemClock.uptimeMillis()
+        val v = viewport
+        val p = page
+        val i = index
 
-        override fun onDrawFrontBufferedLayer(canvas: Canvas, bufferWidth: Int, bufferHeight: Int, param: FrontParam) {
-            canvas.drawColor(Color.TRANSPARENT, BlendMode.CLEAR)
-            canvas.save()
-            applyViewport(canvas, param.viewport)
-            frontCtx.pxPerMm = param.viewport.pxPerMm
-            frontCtx.paperIsDark = param.paperDark
-            frontCtx.smartInversion = param.smartInversion
-            frontCtx.isExport = false
-            val now = SystemClock.uptimeMillis()
-            instruments?.draw(canvas, frontCtx)
-            if (param.wetBrush != null && param.committed != null) {
-                wetRenderer.drawWet(canvas, param.wetBrush, param.wetColor, param.committed, param.predicted, frontCtx)
+        if (p != null && i != null) {
+            val cached = dryViewport
+            val moved = cached != null && cached != v
+            if (dryDirty || dryBitmap == null || cached == null || (moved && now - lastDryRenderMs >= LIVE_REDRAW_MS)) {
+                renderDry(w, h, p, i, v, now)
             }
-            laser.draw(canvas, wetRenderer.shaders, frontCtx, now)
-            eraserOverlay.draw(canvas, wetRenderer.shaders, frontCtx, now)
-            postSnap?.draw(canvas, frontCtx)
-            lasso?.draw(canvas, frontCtx)
-            canvas.restore()
+            val bmp = dryBitmap
+            val rendered = dryViewport
+            if (bmp != null && rendered != null) {
+                if (rendered == v) {
+                    canvas.drawBitmap(bmp, 0f, 0f, null)
+                } else {
+                    // Mid-gesture: reuse the last render through the transform that maps its viewport onto the live one,
+                    // then re-render once the gesture settles.
+                    canvas.drawBitmap(bmp, transformBetween(rendered, v), bitmapPaint)
+                    removeCallbacks(settleRunnable)
+                    postDelayed(settleRunnable, SETTLE_MS)
+                }
+            }
         }
 
-        override fun onDrawMultiBufferedLayer(canvas: Canvas, bufferWidth: Int, bufferHeight: Int, params: Collection<FrontParam>) {
-            val state = dryState
-            canvas.drawColor(Color.TRANSPARENT, BlendMode.CLEAR)
-            if (state == null) return
-            canvas.save()
-            applyViewport(canvas, state.viewport)
-            dryCtx.pxPerMm = state.viewport.pxPerMm
-            dryCtx.smartInversion = state.smartInversion
-            dryCtx.isExport = false
-            dryRenderer.background = dryBackground
-            dryRenderer.render(
-                canvas,
-                state.page,
-                state.index,
-                visiblePageBounds(state.viewport, bufferWidth.toFloat(), bufferHeight.toFloat()),
-                dryCtx,
-                activeAudioPlaybackMs = if (state.audioPlaybackMs >= 0L) state.audioPlaybackMs else null,
-                pxPerMm = state.viewport.pxPerMm,
-                zoom = state.viewport.zoom
-            )
-            canvas.restore()
+        // ---- wet layer: in-progress stroke, instruments, laser, eraser cursor, snap handles, lasso ----
+        canvas.save()
+        applyViewport(canvas, v)
+        frontCtx.pxPerMm = v.pxPerMm
+        frontCtx.paperIsDark = p?.template?.paperColor?.isDark ?: false
+        frontCtx.smartInversion = smartInversion
+        frontCtx.isExport = false
+        instruments?.draw(canvas, frontCtx)
+        if (mode == Mode.INK && buffer.size > 0) {
+            wetRenderer.drawWet(canvas, activeBrush, activeBrush.colorArgb, buffer.freeze(), wetPredicted, frontCtx)
         }
+        laser.draw(canvas, wetRenderer.shaders, frontCtx, now)
+        eraserOverlay.draw(canvas, wetRenderer.shaders, frontCtx, now)
+        postSnap?.draw(canvas, frontCtx)
+        lasso?.draw(canvas, frontCtx)
+        canvas.restore()
+
+        if (dropHighlight) {
+            val stroke = 3f * resources.displayMetrics.density
+            dropPaint.strokeWidth = stroke
+            dropPaint.color = 0xFFD9845B.toInt()
+            canvas.drawRect(stroke / 2f, stroke / 2f, w - stroke / 2f, h - stroke / 2f, dropPaint)
+        }
+
+        if (laser.isActive || eraserOverlay.isActive || lasso?.isAnimating == true) postInvalidateOnAnimation()
+    }
+
+    private fun renderDry(w: Int, h: Int, p: NotebookPage, i: SpatialRTreeIndex, v: ViewportTransform, now: Long) {
+        var bmp = dryBitmap
+        if (bmp == null || bmp.width != w || bmp.height != h) {
+            bmp?.recycle()
+            bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            dryBitmap = bmp
+            dryCanvas = Canvas(bmp)
+        }
+        val c = dryCanvas ?: return
+        bmp.eraseColor(0)
+        c.save()
+        applyViewport(c, v)
+        dryCtx.pxPerMm = v.pxPerMm
+        dryCtx.smartInversion = smartInversion
+        dryCtx.isExport = false
+        dryRenderer.background = dryBackground
+        dryRenderer.render(
+            c,
+            p,
+            i,
+            visiblePageBounds(v, w.toFloat(), h.toFloat()),
+            dryCtx,
+            activeAudioPlaybackMs = if (audioPlaybackMs >= 0L) audioPlaybackMs else null,
+            pxPerMm = v.pxPerMm,
+            zoom = v.zoom
+        )
+        c.restore()
+        dryViewport = v
+        dryDirty = false
+        lastDryRenderMs = now
+    }
+
+    /** Draws just the new stroke into the cached dry bitmap when that is exactly equivalent to a full re-render. */
+    private fun appendToDry(stroke: Stroke): Boolean {
+        val c = dryCanvas ?: return false
+        val p = page ?: return false
+        val v = viewport
+        if (dryDirty || dryViewport != v || audioPlaybackMs >= 0L) return false
+        val type = stroke.brush.type
+        if (type == BrushType.HIGHLIGHTER || type == BrushType.STUDY_TAPE || type == BrushType.ERASER) return false
+        val layer = p.layerById(stroke.layerId) ?: return false
+        if (!layer.isVisible || layer.opacity < 1f) return false
+        if (p.layers.any { it.isVisible && it.zIndex > layer.zIndex }) return false
+        c.save()
+        applyViewport(c, v)
+        dryCtx.pxPerMm = v.pxPerMm
+        dryCtx.paperIsDark = p.template.paperColor.isDark
+        dryCtx.smartInversion = smartInversion
+        dryCtx.isExport = false
+        dryStrokes.drawStroke(c, stroke, dryCtx)
+        c.restore()
+        return true
+    }
+
+    /** Matrix taking pixels rendered under [from] to where they belong under [to] (page space is the common frame). */
+    private fun transformBetween(from: ViewportTransform, to: ViewportTransform): Matrix {
+        viewportMatrix(to, previewMatrix)
+        viewportMatrix(from, inverseMatrix)
+        val inv = Matrix()
+        if (!inverseMatrix.invert(inv)) {
+            previewMatrix.reset()
+            return previewMatrix
+        }
+        previewMatrix.preConcat(inv)
+        return previewMatrix
+    }
+
+    private fun viewportMatrix(v: ViewportTransform, out: Matrix) {
+        out.reset()
+        out.postScale(v.pxPerMm, v.pxPerMm)
+        out.postRotate(v.rotationDeg)
+        out.postTranslate(v.translationX, v.translationY)
     }
 
     private fun applyViewport(canvas: Canvas, v: ViewportTransform) {
@@ -457,14 +581,20 @@ class FrontBufferedInkView(
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         penButtons.onMotionEvent(event)
+        // Instruments first, for finger AND stylus, so palm rejection can never swallow a drag on the ruler.
+        if (instruments?.onTouch(event, viewport) == true) {
+            invalidate()
+            return true
+        }
         if (postSnap?.onTouch(event, viewport) == true) return true
         if (lasso?.onTouch(event, viewport) == true) return true
-        if (instruments?.onTouch(event, viewport) == true) return true
         when (val routing = arbitrator.onTouchEvent(event)) {
             is InputRouting.Ink -> handleInk(event, routing)
             is InputRouting.Gesture -> trackFingerTap(event)
             is InputRouting.Rejected -> tapValid = false
         }
+        val a = event.actionMasked
+        if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) onTouchReleased?.invoke()
         return true
     }
 
@@ -535,6 +665,15 @@ class FrontBufferedInkView(
             return
         }
         postSnap?.dismiss()
+        val selector = lasso
+        if (selector != null && selector.enabled) {
+            viewport.screenToPage(sx, sy, tmp)
+            if (selector.tapSelect(tmp[0], tmp[1], viewport.pxPerMm)) return
+            if (selector.hasSelection) {
+                selector.clearSelection()
+                return
+            }
+        }
         toggleTapeAt(sx, sy)
     }
 
@@ -600,6 +739,7 @@ class FrontBufferedInkView(
         }
         val action = event.actionMasked
         val isDown = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN
+        if (action == MotionEvent.ACTION_DOWN && mode != Mode.NONE) abandonStaleMode()
         if (isDown && mode == Mode.NONE) beginStroke(event, routing)
         if (mode == Mode.NONE) return
 
@@ -760,21 +900,23 @@ class FrontBufferedInkView(
     }
 
     private fun pushWetFrame(predicted: List<StrokePoint>) {
-        val r = renderer ?: return
-        val p = page
-        val frozen = buffer.freeze()
-        val pred = if (predicted.isEmpty()) null else PointArrays.of(predicted)
-        r.renderFrontBufferedLayer(
-            FrontParam(
-                viewport = viewport,
-                paperDark = p?.template?.paperColor?.isDark ?: false,
-                smartInversion = smartInversion,
-                wetBrush = activeBrush,
-                wetColor = activeBrush.colorArgb,
-                committed = frozen,
-                predicted = pred
-            )
-        )
+        wetPredicted = if (predicted.isEmpty()) null else PointArrays.of(predicted)
+        invalidate()
+    }
+
+    /** A new pen-down arrived while a previous sequence never saw its UP: finish it so input can never get stuck. */
+    private fun abandonStaleMode() {
+        removeCallbacks(holdRunnable)
+        when (mode) {
+            Mode.INK -> cancelInk()
+            Mode.ERASE -> finishErase(true)
+            Mode.LASER -> { laser.end(SystemClock.uptimeMillis()); postInvalidateOnAnimation() }
+            Mode.LASSO -> lasso?.endPen(true)
+            Mode.SNAP_EDIT -> postSnap?.endPenDrag(true)
+            else -> Unit
+        }
+        unbatcher.reset()
+        mode = Mode.NONE
     }
 
     private fun buildStroke(): Stroke? {
@@ -805,11 +947,13 @@ class FrontBufferedInkView(
             return
         }
         val handled = holdToSnapHook?.onStrokeEnded(stroke, heldStill, p) { cmd -> executeCommand(cmd, refreshDry = false) } ?: false
+        var appended = false
         if (!handled) {
             executeCommand(AddStroke(stroke), refreshDry = false)
+            appended = appendToDry(stroke)
             _events.tryEmit(InkViewEvent.StrokeCommitted(stroke.id))
         }
-        publishCommitted()
+        publishCommitted(appended)
     }
 
     /** (Re)starts the stillness watchdog; it fires if the pen stays inside the 6dp radius for 320ms. */
@@ -844,19 +988,16 @@ class FrontBufferedInkView(
         clearFront()
     }
 
-    /** Publishes the new dry state first, then commit() hands the front buffer over to the multi-buffered layer. */
-    private fun publishCommitted() {
-        val p = page
-        val i = index
-        if (p != null && i != null) dryState = DryState(p, i, viewport, smartInversion, audioPlaybackMs)
-        renderer?.commit()
-        if (overlaysVisible()) pushOverlayFrame()
+    /** The wet stroke is now part of the page: drop the wet buffer and, unless it was painted into the cache, re-render. */
+    private fun publishCommitted(appendedToDry: Boolean = false) {
+        wetPredicted = null
+        if (!appendedToDry) dryDirty = true
+        invalidate()
     }
 
     private fun clearFront() {
-        val r = renderer ?: return
-        r.cancel()
-        r.clear()
+        wetPredicted = null
+        invalidate()
     }
 
     private fun finishErase(cancelled: Boolean) {
@@ -885,25 +1026,11 @@ class FrontBufferedInkView(
     // =====================================================================================
 
     private fun pushOverlayFrame() {
-        val r = renderer ?: return
-        val wet = if (mode == Mode.INK) buffer.freeze() else null
-        r.renderFrontBufferedLayer(
-            FrontParam(
-                viewport = viewport,
-                paperDark = page?.template?.paperColor?.isDark ?: false,
-                smartInversion = smartInversion,
-                wetBrush = if (wet != null) activeBrush else null,
-                wetColor = activeBrush.colorArgb,
-                committed = wet,
-                predicted = null
-            )
-        )
+        invalidate()
     }
 
     private fun scheduleLoop() {
-        if (loopRunning) return
-        loopRunning = true
-        Choreographer.getInstance().postFrameCallback(frameCallback)
+        postInvalidateOnAnimation()
     }
 
     private companion object {
@@ -913,5 +1040,8 @@ class FrontBufferedInkView(
         const val TAP_TIMEOUT_MS = 300L
         const val STYLUS_TAP_TIMEOUT_MS = 350L
         const val TAPE_TAP_RADIUS_MM = 2.0f
+        const val SETTLE_MS = 90L
+        const val REPLAY_STEP_MS = 66L
+        const val LIVE_REDRAW_MS = 160L
     }
 }

@@ -75,16 +75,20 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
+private data class StudioType(val type: BrushType, val label: String, val blurb: String)
+
 private val StudioTypes = listOf(
-    BrushType.FOUNTAIN_PEN to "Fountain",
-    BrushType.BALLPOINT to "Ballpoint",
-    BrushType.FINELINER to "Fineliner",
-    BrushType.BRUSH_PEN to "Brush",
-    BrushType.PENCIL to "Pencil",
-    BrushType.HIGHLIGHTER to "Highlighter",
-    BrushType.PROCEDURAL_LINE to "Dashed / Wavy",
-    BrushType.STUDY_TAPE to "Study tape"
+    StudioType(BrushType.FOUNTAIN_PEN, "Fountain", "Smooth ink flow"),
+    StudioType(BrushType.BALLPOINT, "Ballpoint", "Reliable everyday writing"),
+    StudioType(BrushType.FINELINER, "Fineliner", "Crisp thin lines"),
+    StudioType(BrushType.BRUSH_PEN, "Brush", "Expressive calligraphy strokes"),
+    StudioType(BrushType.PENCIL, "Pencil", "Grainy sketch feel"),
+    StudioType(BrushType.HIGHLIGHTER, "Highlighter", "Translucent marker bands"),
+    StudioType(BrushType.PROCEDURAL_LINE, "Dashed", "Dashed, dotted, wavy"),
+    StudioType(BrushType.STUDY_TAPE, "Study tape", "Hide and reveal")
 )
+
+private enum class StudioTab(val title: String) { QUICK("Quick Setup"), PRO("Pro Physics") }
 
 private fun freshFor(type: BrushType, old: BrushConfig): BrushConfig {
     val base = when (type) {
@@ -136,6 +140,7 @@ fun PenStudioModal(vm: WorkspaceViewModel, slot: Int, onDismiss: () -> Unit) {
                         .padding(18.dp)
                 ) {
                     val wide = maxWidth >= 720.dp
+                    var tab by remember { mutableStateOf(StudioTab.QUICK) }
                     Column(Modifier.fillMaxSize()) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(
@@ -147,25 +152,57 @@ fun PenStudioModal(vm: WorkspaceViewModel, slot: Int, onDismiss: () -> Unit) {
                             Box(Modifier.padding(start = 8.dp)) { ChipButton("Done", true, onDismiss) }
                         }
                         Box(Modifier.height(10.dp))
-                        if (wide) {
-                            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            for (t in StudioTab.values()) ChipButton(t.title, tab == t, { tab = t })
+                        }
+                        Box(Modifier.height(10.dp))
+                        when (tab) {
+                            StudioTab.QUICK -> if (wide) {
+                                Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                                    Column(
+                                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) { TypeCards(draft, ::commit); Scratchpad(draft) { scratch = it }; ScratchClear { scratch?.clear() } }
+                                    Column(
+                                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) { QuickRight(vm, draft, ::commit) }
+                                }
+                            } else {
                                 Column(
-                                    Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) { LeftColumn(draft, ::commit) { scratch = it } ; ScratchClear { scratch?.clear() } }
-                                Column(
-                                    Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) { RightColumn(vm, draft, ::commit) }
+                                ) {
+                                    TypeCards(draft, ::commit)
+                                    Scratchpad(draft) { scratch = it }
+                                    ScratchClear { scratch?.clear() }
+                                    QuickRight(vm, draft, ::commit)
+                                }
                             }
-                        } else {
-                            Column(
-                                Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                LeftColumn(draft, ::commit) { scratch = it }
-                                ScratchClear { scratch?.clear() }
-                                RightColumn(vm, draft, ::commit)
+                            StudioTab.PRO -> if (wide) {
+                                Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                                    Column(
+                                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) { ProColumn(draft, ::commit) }
+                                    Column(
+                                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        SectionLabel("Live preview")
+                                        Scratchpad(draft) { scratch = it }
+                                        ScratchClear { scratch?.clear() }
+                                    }
+                                }
+                            } else {
+                                Column(
+                                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Scratchpad(draft) { scratch = it }
+                                    ScratchClear { scratch?.clear() }
+                                    ProColumn(draft, ::commit)
+                                }
                             }
                         }
                     }
@@ -181,29 +218,36 @@ private fun ScratchClear(onClear: () -> Unit) {
 }
 
 @Composable
-private fun LeftColumn(draft: BrushConfig, commit: (BrushConfig) -> Unit, onScratch: (ScratchpadView) -> Unit) {
+private fun TypeCards(draft: BrushConfig, commit: (BrushConfig) -> Unit) {
     SectionLabel("Instrument")
-    for (row in StudioTypes.chunked(4)) {
+    for (row in StudioTypes.chunked(2)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for ((type, label) in row) {
-                val sel = draft.type == type
-                Column(
+            for (t in row) {
+                val sel = draft.type == t.type
+                Row(
                     Modifier
                         .weight(1f)
                         .background(if (sel) Warm.AccentSoft else Color(0x14FFF1DC), RoundedCornerShape(14.dp))
                         .border(1.dp, if (sel) Warm.Accent else Color.Transparent, RoundedCornerShape(14.dp))
-                        .clickable { if (!sel) commit(freshFor(type, draft)) }
-                        .padding(vertical = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .clickable { if (!sel) commit(freshFor(t.type, draft)) }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    BrushTypeIcon(type, tint = Color(draft.colorArgb), size = 30.dp)
-                    Text(label, color = if (sel) Warm.Text else Warm.TextMuted, fontSize = 11.sp, maxLines = 1)
+                    BrushTypeIcon(t.type, tint = Color(draft.colorArgb), size = 36.dp)
+                    Column {
+                        Text(t.label, color = Warm.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        Text(t.blurb, color = Warm.TextMuted, fontSize = 11.sp, maxLines = 2)
+                    }
                 }
             }
         }
         Box(Modifier.height(4.dp))
     }
+}
 
+@Composable
+private fun Scratchpad(draft: BrushConfig, onScratch: (ScratchpadView) -> Unit) {
     SectionLabel("Scratchpad  (write with the pen to test)")
     Box(
         Modifier
@@ -218,13 +262,10 @@ private fun LeftColumn(draft: BrushConfig, commit: (BrushConfig) -> Unit, onScra
             modifier = Modifier.fillMaxSize()
         )
     }
-
-    SectionLabel("Pressure response")
-    PressureCurveEditor(draft.pressureCurve) { commit(draft.copy(pressureCurve = it)) }
 }
 
 @Composable
-private fun RightColumn(vm: WorkspaceViewModel, draft: BrushConfig, commit: (BrushConfig) -> Unit) {
+private fun QuickRight(vm: WorkspaceViewModel, draft: BrushConfig, commit: (BrushConfig) -> Unit) {
     SectionLabel("Stroke")
     LabeledSlider(
         "Thickness", draft.widthMm, 0.1f..20f, String.format(Locale.US, "%.2f mm", draft.widthMm),
@@ -234,11 +275,23 @@ private fun RightColumn(vm: WorkspaceViewModel, draft: BrushConfig, commit: (Bru
         "Opacity", draft.opacity, 0.05f..1f, "${(draft.opacity * 100).toInt()}%",
         onChange = { commit(draft.copy(opacity = it)) }
     )
+    ColorStudio(vm, draft.colorArgb) { commit(draft.copy(colorArgb = it)) }
+}
+
+@Composable
+private fun ProColumn(draft: BrushConfig, commit: (BrushConfig) -> Unit) {
+    SectionLabel("Stabilisation")
     LabeledSlider(
         "Streamline (smoothing)", draft.streamline, 0f..1f, "${(draft.streamline * 100).toInt()}%",
         onChange = { commit(draft.copy(streamline = it)) }
     )
+    TypeSpecific(draft, commit)
+    SectionLabel("Pressure response")
+    PressureCurveEditor(draft.pressureCurve) { commit(draft.copy(pressureCurve = it)) }
+}
 
+@Composable
+private fun TypeSpecific(draft: BrushConfig, commit: (BrushConfig) -> Unit) {
     when (draft.type) {
         BrushType.FOUNTAIN_PEN, BrushType.HIGHLIGHTER -> {
             SectionLabel(if (draft.type == BrushType.FOUNTAIN_PEN) "Nib" else "Chisel tip")
@@ -308,8 +361,6 @@ private fun RightColumn(vm: WorkspaceViewModel, draft: BrushConfig, commit: (Bru
         }
         else -> Unit
     }
-
-    ColorStudio(vm, draft.colorArgb) { commit(draft.copy(colorArgb = it)) }
 }
 
 // ============================================================================================

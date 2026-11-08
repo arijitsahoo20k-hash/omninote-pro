@@ -1,5 +1,7 @@
 package com.omninote.pro.ui.workspace
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +16,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +29,8 @@ import androidx.compose.material.icons.rounded.Category
 import androidx.compose.material.icons.rounded.FormatColorFill
 import androidx.compose.material.icons.rounded.Gesture
 import androidx.compose.material.icons.rounded.HideSource
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Highlight
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.OpenWith
@@ -62,6 +69,9 @@ import java.util.Locale
 
 private enum class Popover { NONE, ERASER, LASSO, FILL, TAPE, LASER, INSTRUMENT, DOCK }
 
+/** HyperOS draws its 3-dots multitasking handle at the top centre; nothing interactive may sit in this band. */
+val TopCenterDeadzone = 180.dp
+
 /**
  * The floating tool dock. It fills its parent, draws nothing outside the dock itself and lets every other touch pass
  * through to the canvas. Position and collapsed state come from (and are saved to) the user preferences.
@@ -83,7 +93,11 @@ fun FloatingPenDock(
     val canRedo by vm.canRedo.collectAsState()
     val undoLabel by vm.undoLabel.collectAsState()
     val layerNumber by vm.activeLayerNumber.collectAsState()
+    val readMode by vm.readMode.collectAsState()
     var popover by remember { mutableStateOf(Popover.NONE) }
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) vm.importImage(uri)
+    }
 
     val edge = prefs.dockEdge
     val vertical = edge == DockEdge.LEFT || edge == DockEdge.RIGHT
@@ -91,10 +105,11 @@ fun FloatingPenDock(
 
     fun toggle(p: Popover) { popover = if (popover == p) Popover.NONE else p }
 
-    Box(modifier.fillMaxSize().padding(12.dp)) {
+    Box(modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).padding(12.dp)) {
         if (prefs.dockCollapsed) {
+            // The collapsed pill never sits top-centre (HyperOS handle): a top dock collapses into the top-right corner.
             val align = when (edge) {
-                DockEdge.TOP -> Alignment.TopCenter
+                DockEdge.TOP -> Alignment.TopEnd
                 DockEdge.BOTTOM -> Alignment.BottomCenter
                 DockEdge.LEFT -> Alignment.CenterStart
                 DockEdge.RIGHT -> Alignment.CenterEnd
@@ -132,6 +147,8 @@ fun FloatingPenDock(
                         Popover.LASER -> LaserPopover(vm)
                         Popover.INSTRUMENT -> InstrumentPopover(vm)
                         Popover.DOCK -> DockPopover(
+                            fillSelected = tool == WorkspaceTool.FILL_BUCKET,
+                            onFill = { popover = Popover.FILL; vm.setTool(WorkspaceTool.FILL_BUCKET) },
                             current = edge,
                             onPick = { vm.userPrefs.setDock(it, false); popover = Popover.NONE },
                             onCollapse = { vm.userPrefs.setDock(edge, true); popover = Popover.NONE }
@@ -144,7 +161,7 @@ fun FloatingPenDock(
 
         val dockContent: @Composable () -> Unit = {
             DockBody(vertical = vertical) {
-                // ---- presets
+                // ---- group 1: pens, colours, thickness
                 for ((i, cfg) in slots.withIndex()) {
                     PresetPill(
                         type = cfg.type,
@@ -157,21 +174,33 @@ fun FloatingPenDock(
                         }
                     )
                 }
+                if (activeBrush != null) {
+                    val palette = (AcademicPalettes.byId(prefs.activePalette).colors + prefs.customSwatches).take(5)
+                    QuickStyle(
+                        vertical = vertical,
+                        colors = palette,
+                        currentColor = activeBrush.colorArgb,
+                        currentWidth = activeBrush.widthMm,
+                        isHighlighter = activeBrush.type == BrushType.HIGHLIGHTER,
+                        onColor = { c -> vm.updatePresetSlot(activeSlot, activeBrush.copy(colorArgb = c)) },
+                        onWidth = { w -> vm.updatePresetSlot(activeSlot, activeBrush.copy(widthMm = w)) }
+                    )
+                }
                 DockDivider(vertical)
 
-                // ---- tool switchers
-                DockTool(Icons.Rounded.PanTool, "Hand", tool == WorkspaceTool.HAND_PAN) {
-                    popover = Popover.NONE; vm.setTool(WorkspaceTool.HAND_PAN)
-                }
+                // ---- group 2: tools
                 DockTool(Icons.Rounded.AutoFixNormal, "Eraser", tool == WorkspaceTool.ERASER) {
                     if (tool == WorkspaceTool.ERASER) toggle(Popover.ERASER) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.ERASER) }
                 }
                 DockTool(Icons.Rounded.Gesture, "Lasso", tool == WorkspaceTool.LASSO) {
                     if (tool == WorkspaceTool.LASSO) toggle(Popover.LASSO) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.LASSO) }
                 }
-                DockTool(Icons.Rounded.FormatColorFill, "Fill", tool == WorkspaceTool.FILL_BUCKET) {
-                    if (tool == WorkspaceTool.FILL_BUCKET) toggle(Popover.FILL) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.FILL_BUCKET) }
+                DockTool(Icons.Rounded.Image, "Image", false) {
+                    popover = Popover.NONE
+                    pickImage.launch("image/*")
                 }
+                DockTool(Icons.Rounded.Category, "Shapes", false) { popover = Popover.NONE; onOpenStencils() }
+                DockTool(Icons.Rounded.Straighten, "Ruler", instrument != GeometryInstrument.NONE) { toggle(Popover.INSTRUMENT) }
                 val tapeActive = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.STUDY_TAPE
                 DockTool(Icons.Rounded.HideSource, "Tape", tapeActive) {
                     if (tapeActive) toggle(Popover.TAPE) else {
@@ -181,17 +210,19 @@ fun FloatingPenDock(
                     }
                 }
                 DockTool(Icons.Rounded.Highlight, "Laser", tool == WorkspaceTool.LASER) {
-                    if (tool == WorkspaceTool.LASER) toggle(Popover.LASER) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.LASER) }
+                    if (tool == WorkspaceTool.LASER) toggle(Popover.LASER) else { vm.setTool(WorkspaceTool.LASER); popover = Popover.LASER }
                 }
-                DockTool(Icons.Rounded.Straighten, "Ruler", instrument != GeometryInstrument.NONE) { toggle(Popover.INSTRUMENT) }
+                DockTool(Icons.Rounded.PanTool, "Read", readMode || tool == WorkspaceTool.HAND_PAN) {
+                    popover = Popover.NONE
+                    if (tool == WorkspaceTool.HAND_PAN) vm.setTool(WorkspaceTool.INK)
+                    vm.toggleReadMode()
+                }
                 DockDivider(vertical)
 
-                // ---- quick actions
+                // ---- group 3: history and layers
                 UndoRedoPair(canUndo, canRedo, undoLabel, vertical, onUndo = vm::undo, onRedo = vm::redo)
-                DockTool(Icons.Rounded.Category, "Stencils", false) { popover = Popover.NONE; onOpenStencils() }
                 LayerButton(layerNumber) { popover = Popover.NONE; onOpenLayers() }
-                DockTool(Icons.Rounded.OpenWith, "Move", popover == Popover.DOCK) { toggle(Popover.DOCK) }
-                DockTool(Icons.Rounded.UnfoldLess, "Hide", false) { vm.userPrefs.setDock(edge, true) }
+                DockTool(Icons.Rounded.MoreHoriz, "More", popover == Popover.DOCK) { toggle(Popover.DOCK) }
             }
         }
 
@@ -502,7 +533,15 @@ private fun InstrumentPopover(vm: WorkspaceViewModel) {
 }
 
 @Composable
-private fun DockPopover(current: DockEdge, onPick: (DockEdge) -> Unit, onCollapse: () -> Unit) {
+private fun DockPopover(
+    fillSelected: Boolean,
+    onFill: () -> Unit,
+    current: DockEdge,
+    onPick: (DockEdge) -> Unit,
+    onCollapse: () -> Unit
+) {
+    SectionLabel("Fill bucket")
+    ChipButton("Fill bucket", fillSelected, onFill)
     SectionLabel("Dock position")
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
         ChipButton("Top", current == DockEdge.TOP, { onPick(DockEdge.TOP) })
@@ -511,4 +550,53 @@ private fun DockPopover(current: DockEdge, onPick: (DockEdge) -> Unit, onCollaps
         ChipButton("Right", current == DockEdge.RIGHT, { onPick(DockEdge.RIGHT) })
     }
     Box(Modifier.padding(top = 10.dp)) { ChipButton("Collapse to pill", false, onCollapse) }
+}
+
+/** Five palette swatches and three thickness dots for the active pen. */
+@Composable
+private fun QuickStyle(
+    vertical: Boolean,
+    colors: List<Int>,
+    currentColor: Int,
+    currentWidth: Float,
+    isHighlighter: Boolean,
+    onColor: (Int) -> Unit,
+    onWidth: (Float) -> Unit
+) {
+    val widths = if (isHighlighter) listOf(3f, 5f, 8f) else listOf(0.3f, 0.6f, 1.2f)
+    val nearest = widths.indices.minByOrNull { kotlin.math.abs(widths[it] - currentWidth) } ?: 1
+    val swatches: @Composable () -> Unit = {
+        for (c in colors) {
+            Box(Modifier.clickable { onColor(c) }.padding(2.dp)) { ColorDot(c, 20.dp, ring = c == currentColor) }
+        }
+    }
+    val dots: @Composable () -> Unit = {
+        for ((i, w) in widths.withIndex()) {
+            val d = (7 + i * 4).dp
+            Box(
+                Modifier
+                    .size(26.dp)
+                    .clickable { onWidth(w) },
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    Modifier
+                        .size(d)
+                        .background(if (i == nearest) Warm.Accent else Warm.TextMuted.copy(alpha = 0.6f), CircleShape)
+                )
+            }
+        }
+    }
+    if (vertical) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row { for (c in colors.take(3)) Box(Modifier.clickable { onColor(c) }.padding(1.dp)) { ColorDot(c, 14.dp, ring = c == currentColor) } }
+            Row { for (c in colors.drop(3)) Box(Modifier.clickable { onColor(c) }.padding(1.dp)) { ColorDot(c, 14.dp, ring = c == currentColor) } }
+            Row { dots() }
+        }
+    } else {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(verticalAlignment = Alignment.CenterVertically) { swatches() }
+            Row(verticalAlignment = Alignment.CenterVertically) { dots() }
+        }
+    }
 }

@@ -183,7 +183,8 @@ class MainActivity : ComponentActivity() {
                                 deps = g.workspaceDependencies,
                                 open = r.open,
                                 penRouter = g.penKeyRouter,
-                                onExit = { route = Route.Library }
+                                onExit = { route = Route.Library },
+                                onCreateNotebook = { spec -> g.repository.createNotebook(spec) }
                             )
                         }
                     }

@@ -230,6 +230,14 @@ class WorkspaceViewModel(
     private val _laserMode = MutableStateFlow(LaserMode.PERSISTENCE_TRAIL)
     val laserMode: StateFlow<LaserMode> = _laserMode.asStateFlow()
 
+    private val _readMode = MutableStateFlow(false)
+    /** Read/Scroll mode: one finger scrolls the page and pulling past an edge turns the page. */
+    val readMode: StateFlow<Boolean> = _readMode.asStateFlow()
+
+    private val _edgePull = MutableStateFlow(0)
+    /** -1 = pulled past the top (previous page), +1 = pulled past the bottom (next page), 0 = none. */
+    val edgePull: StateFlow<Int> = _edgePull.asStateFlow()
+
     private val _instrument = MutableStateFlow(GeometryInstrument.NONE)
     val instrument: StateFlow<GeometryInstrument> = _instrument.asStateFlow()
 
@@ -289,6 +297,8 @@ class WorkspaceViewModel(
     private var hardwareReturnTool: WorkspaceTool? = null
     private var opacityDragBase: NotebookPage? = null
     private var lastSelectionIds: Set<String> = emptySet()
+    private var pendingSelectIds: Set<String> = emptySet()
+    private val _replayVisible = MutableStateFlow(false)
     private val exporter by lazy { SvgAndRasterExporter(ExportRenderKit(context, deps.stencils), pageDao, store) }
 
     init {
@@ -303,7 +313,10 @@ class WorkspaceViewModel(
                 }
             }
         }
-        viewModelScope.launch { player.playbackPositionMs.collect { view?.setAudioPlaybackMs(it) } }
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(player.playbackPositionMs, _replayVisible) { pos, visible -> if (visible) pos else null }
+                .collect { view?.setAudioPlaybackMs(it) }
+        }
         viewModelScope.launch { loadNotebook() }
     }
 
@@ -380,13 +393,19 @@ class WorkspaceViewModel(
         snapHook = GeometricSnapHook(postSnap)
         fillBucket = FillBucketHandler(host, undoManager).also { view.fillBucket = it }
         lasso = LassoController(host, undoManager, density).also { view.lasso = it }
-        instruments = InteractiveRulerOverlay(density, { 5f }) { view.requestOverlay() }.also { view.instruments = it }
+        instruments = InteractiveRulerOverlay(density, { 5f }) { view.requestOverlay() }.also {
+            it.onClosed = { _ -> _instrument.value = GeometryInstrument.NONE; applyInstrument() }
+            view.instruments = it
+        }
+        view.onViewportChanged = { v -> publishViewport(v); checkPageEdge(v) }
+        view.onSelectionChanged = { refreshSelection() }
+        view.onTouchReleased = { commitEdgePull() }
 
         view.pdfTiles = pdfTiles
         view.audioOffsetProvider = { if (recorder.isRecording) recorder.currentAudioOffsetMs() else null }
         view.gestureListener = ::onGesture
         if (_audioTapSeek.value) installTapSeek(view)
-        view.setAudioPlaybackMs(player.playbackPositionMs.value)
+        view.setAudioPlaybackMs(if (_replayVisible.value) player.playbackPositionMs.value else null)
 
         viewJob = viewModelScope.launch {
             view.events.collect { ev ->
@@ -416,6 +435,9 @@ class WorkspaceViewModel(
             it.gestureListener = null
             it.tapInterceptor = null
             it.audioOffsetProvider = null
+            it.onViewportChanged = null
+            it.onSelectionChanged = null
+            it.onTouchReleased = null
         }
         view = null
         eraser = null
@@ -429,6 +451,13 @@ class WorkspaceViewModel(
     /** Called by the host after it re-pointed the view for a revision, to keep the ruler and lasso consistent. */
     fun onViewPageApplied() {
         applyToolToView()
+        val pending = pendingSelectIds
+        if (pending.isNotEmpty()) {
+            pendingSelectIds = emptySet()
+            lasso?.select(pending)
+            lastSelectionIds = emptySet()
+            refreshSelection()
+        }
     }
 
     private fun syncActiveLayerToView() {
@@ -447,7 +476,7 @@ class WorkspaceViewModel(
         v.eraserBrush = _eraserConfig.value
         v.smartInversion = p.darkModeInkInversion
         v.holdToSnapHook = if (p.holdToSnapEnabled) snapHook else null
-        v.singleFingerPanEnabled = p.singleFingerPanEnabled || t == WorkspaceTool.HAND_PAN
+        v.singleFingerPanEnabled = p.singleFingerPanEnabled || t == WorkspaceTool.HAND_PAN || _readMode.value
         v.fillMode = t == WorkspaceTool.FILL_BUCKET
         fillBucket?.fill = _fillConfig.value
         eraser?.acrossLayers = false
@@ -501,6 +530,57 @@ class WorkspaceViewModel(
         applyToolToView()
     }
 
+    fun toggleReadMode() {
+        _readMode.value = !_readMode.value
+        applyToolToView()
+    }
+
+    /** Edge overscroll: when the page has been dragged well past its top or bottom, offer the neighbouring page. */
+    private fun checkPageEdge(v: ViewportTransform) {
+        val page = _pageSync.value?.page
+        val iv = this.view
+        if (page == null || iv == null || iv.height == 0 || (!_readMode.value && _tool.value != WorkspaceTool.HAND_PAN)) {
+            if (_edgePull.value != 0) _edgePull.value = 0
+            return
+        }
+        val out = FloatArray(2)
+        v.pageToScreen(0f, 0f, out)
+        val top = out[1]
+        v.pageToScreen(0f, page.heightMm, out)
+        val bottom = out[1]
+        val threshold = 90f * (iv.resources.displayMetrics.density)
+        val pull = when {
+            top > threshold && _currentPageIndex.value > 0 -> -1
+            bottom < iv.height - threshold && _currentPageIndex.value < _pages.value.lastIndex -> 1
+            else -> 0
+        }
+        if (pull != _edgePull.value) _edgePull.value = pull
+    }
+
+    /** Called when the finger lifts: commits a pending edge pull as a page turn. */
+    fun commitEdgePull() {
+        val pull = _edgePull.value
+        if (pull == 0) return
+        _edgePull.value = 0
+        val target = _currentPageIndex.value + pull
+        jumpToPage(target)
+        if (pull > 0) scrollToTopOnNextShow = true else scrollToBottomOnNextShow = true
+    }
+
+    private var scrollToTopOnNextShow = false
+    private var scrollToBottomOnNextShow = false
+
+    /** After an edge-pull page turn: +1 = start at the top of the new page, -1 = start at its bottom, 0 = keep the offset. */
+    fun consumeEdgeScroll(): Int {
+        val r = if (scrollToTopOnNextShow) 1 else if (scrollToBottomOnNextShow) -1 else 0
+        scrollToTopOnNextShow = false
+        scrollToBottomOnNextShow = false
+        return r
+    }
+
+    fun nextPage() = jumpToPage(_currentPageIndex.value + 1)
+    fun previousPage() = jumpToPage(_currentPageIndex.value - 1)
+
     fun selectPresetSlot(slot: Int) {
         val s = slot.coerceIn(0, UserPreferences.SLOT_COUNT - 1)
         prefs.setActivePenSlot(s)
@@ -536,6 +616,7 @@ class WorkspaceViewModel(
     }
 
     fun setLaserMode(mode: LaserMode) {
+        if (_laserMode.value == mode) { applyToolToView(); return }
         _laserMode.value = mode
         applyToolToView()
     }
@@ -756,6 +837,11 @@ class WorkspaceViewModel(
         }
     }
 
+    /** Saves the open page without blocking the caller (used just before leaving the workspace). */
+    fun flushAsync() {
+        deps.appScope.launch { runCatching { flushCurrentPage() } }
+    }
+
     private suspend fun flushCurrentPage() {
         saveJob?.cancel()
         val p = _pageSync.value?.page ?: return
@@ -956,10 +1042,10 @@ class WorkspaceViewModel(
         refreshSelection()
     }
 
-    fun lassoCut() { lasso?.cut(); afterLassoEdit() }
+    fun lassoCut() { lasso?.cut(); lasso?.clearSelection(); afterLassoEdit() }
     fun lassoCopy() { lasso?.copy() }
     fun lassoDuplicate() { lasso?.duplicateSelection(); afterLassoEdit() }
-    fun lassoDelete() { lasso?.deleteSelection(); afterLassoEdit() }
+    fun lassoDelete() { lasso?.deleteSelection(); lasso?.clearSelection(); afterLassoEdit() }
     fun lassoPaste() { viewCenterPage()?.let { lasso?.paste(it) }; afterLassoEdit() }
     fun lassoFlipHorizontal() { lasso?.flipHorizontal(); afterLassoEdit() }
     fun lassoFlipVertical() { lasso?.flipVertical(); afterLassoEdit() }
@@ -987,6 +1073,7 @@ class WorkspaceViewModel(
                 is OcrOutcome.Failed -> _events.tryEmit(WorkspaceEvent.Message("Couldn't recognise that: ${o.message}"))
                 else -> _events.tryEmit(WorkspaceEvent.Message("No handwriting found in the selection."))
             }
+            lasso?.clearSelection()
             afterLassoEdit()
         }
     }
@@ -996,6 +1083,7 @@ class WorkspaceViewModel(
         viewModelScope.launch {
             val row = l.saveSelectionAsSticker(collectionId, title.trim().ifEmpty { "Sticker" }, stickerDao, store)
             _events.tryEmit(WorkspaceEvent.Message(if (row != null) "Saved to My Stickers." else "Select something first."))
+            if (row != null) { l.clearSelection(); afterLassoEdit() }
         }
     }
 
@@ -1051,7 +1139,24 @@ class WorkspaceViewModel(
             stencilKey, p, index, undoManager, layer.id, v.viewport, v.width.toFloat(), v.height.toFloat(),
             colorArgb = b.colorArgb, strokeWidthMm = b.widthMm.coerceIn(0.2f, 1.2f)
         )
-        if (result !== p) commitExternal(result)
+        if (result !== p) {
+            val before = elementIdsOf(p)
+            commitExternal(result)
+            focusNewElements(elementIdsOf(result) - before)
+        }
+    }
+
+    private fun elementIdsOf(p: NotebookPage): Set<String> {
+        val ids = HashSet<String>()
+        for (l in p.layers) for (e in l.allElements()) ids.add(e.id)
+        return ids
+    }
+
+    /** Switches to Lasso and selects [ids] as soon as the view shows the page that contains them. */
+    private fun focusNewElements(ids: Set<String>) {
+        if (ids.isEmpty()) return
+        pendingSelectIds = ids
+        setTool(WorkspaceTool.LASSO)
     }
 
     fun createStickerCollection(name: String) {
@@ -1083,6 +1188,7 @@ class WorkspaceViewModel(
         val l = lasso ?: return
         val center = viewCenterPage() ?: return
         viewModelScope.launch {
+            setTool(WorkspaceTool.LASSO)
             val elements = store.readSticker(stickerId)?.allElements()
             if (elements.isNullOrEmpty()) {
                 _events.tryEmit(WorkspaceEvent.Message("That sticker's file is missing."))
@@ -1128,10 +1234,13 @@ class WorkspaceViewModel(
         val pageId = recorder.state.value.pageId
         val file = recorder.stop() ?: return
         if (pageId == null) return
+        // Update the in-memory page list first so the bar switches to Replay at once, then persist.
+        val path = file.absolutePath
+        _pages.value = _pages.value.map { if (it.pageId == pageId) it.copy(audioFilePath = path) else it }
+        if (_pageSync.value?.page?.id == pageId) player.load(file)
         viewModelScope.launch {
-            pageDao.setAudioFile(pageId, file.absolutePath, System.currentTimeMillis())
+            pageDao.setAudioFile(pageId, path, System.currentTimeMillis())
             _pages.value = pageDao.getPages(notebookId)
-            if (_pageSync.value?.page?.id == pageId) player.load(file)
         }
     }
 
@@ -1151,6 +1260,15 @@ class WorkspaceViewModel(
         setAudioTapSeek(false)
         player.pause()
         view?.setAudioPlaybackMs(null)
+    }
+
+    /** The Replay panel is on screen: only then does the page switch to ghost/glow replay rendering. */
+    fun setAudioReplayVisible(visible: Boolean) {
+        _replayVisible.value = visible
+        if (!visible) {
+            setAudioTapSeek(false)
+            player.pause()
+        }
     }
 
     private val _audioTapSeek = MutableStateFlow(false)
@@ -1225,7 +1343,94 @@ class WorkspaceViewModel(
             _events.tryEmit(WorkspaceEvent.LockedLayerRejected(result.element.layerId, layer?.name))
             return false
         }
-        return exec(result.addCommand)
+        val ok = exec(result.addCommand)
+        if (ok) focusNewElements(setOf(result.element.id))
+        return ok
+    }
+
+    /**
+     * Imports a picture from the gallery or a drag-and-drop: downscales it to at most 2048 px, stores it under
+     * `filesDir/images/{notebookId}/{imageId}.png`, places it at [atMm] (or the view centre) on the active layer and selects it.
+     */
+    fun importImage(uri: Uri, atMm: PointMm? = null) {
+        val first = _pageSync.value?.page ?: return
+        val layer0 = first.layerById(_activeLayerId.value)
+        if (layer0 == null || !layer0.isEditable) {
+            _events.tryEmit(WorkspaceEvent.LockedLayerRejected(_activeLayerId.value, layer0?.name))
+            return
+        }
+        val centre = atMm ?: viewCenterPage() ?: PointMm(first.widthMm / 2f, first.heightMm / 2f)
+        viewModelScope.launch {
+            val saved = withContext(kotlinx.coroutines.Dispatchers.IO) { decodeAndStoreImage(uri) }
+            if (saved == null) {
+                _events.tryEmit(WorkspaceEvent.Message("Couldn't read that image."))
+                return@launch
+            }
+            val p = _pageSync.value?.page ?: return@launch
+            val layer = p.layerById(_activeLayerId.value)?.takeIf { it.isEditable }
+                ?: run {
+                    _events.tryEmit(WorkspaceEvent.LockedLayerRejected(_activeLayerId.value, null))
+                    return@launch
+                }
+            val mmPerPx = minOf(p.widthMm * 0.6f / saved.width, p.heightMm * 0.5f / saved.height, 25.4f / 96f)
+            val w = saved.width * mmPerPx
+            val h = saved.height * mmPerPx
+            val element = com.omninote.pro.core.model.ImageElement(
+                id = UUID.randomUUID().toString(),
+                layerId = layer.id,
+                assetRelativePath = saved.relativePath,
+                bounds = StrokeBounds(centre.x - w / 2f, centre.y - h / 2f, centre.x + w / 2f, centre.y + h / 2f),
+                hasTransparentBg = true
+            )
+            if (exec(com.omninote.pro.data.AddElement(element))) focusNewElements(setOf(element.id))
+        }
+    }
+
+    private class SavedImage(val relativePath: String, val width: Int, val height: Int)
+
+    private fun decodeAndStoreImage(uri: Uri): SavedImage? {
+        return try {
+            val resolver = context.contentResolver
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_IMPORT_PX) sample *= 2
+            var bmp = resolver.openInputStream(uri)?.use {
+                android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+            } ?: return null
+            val rotation = try {
+                resolver.openInputStream(uri)?.use { ins ->
+                    when (android.media.ExifInterface(ins).getAttributeInt(
+                        android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL
+                    )) {
+                        android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                        android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                        android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                        else -> 0f
+                    }
+                } ?: 0f
+            } catch (e: Exception) { 0f }
+            val longSide = maxOf(bmp.width, bmp.height)
+            val scale = if (longSide > MAX_IMPORT_PX) MAX_IMPORT_PX.toFloat() / longSide else 1f
+            if (scale < 1f || rotation != 0f) {
+                val m = android.graphics.Matrix().apply { postScale(scale, scale); postRotate(rotation) }
+                val t = android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                if (t !== bmp) bmp.recycle()
+                bmp = t
+            }
+            val relative = "images/$notebookId/${UUID.randomUUID()}.png"
+            val file = File(context.filesDir, relative)
+            file.parentFile?.mkdirs()
+            file.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            val result = SavedImage(relative, bmp.width, bmp.height)
+            bmp.recycle()
+            result
+        } catch (e: Exception) {
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        }
     }
 
     // =====================================================================================
@@ -1267,6 +1472,7 @@ class WorkspaceViewModel(
     }
 
     private companion object {
+        const val MAX_IMPORT_PX = 2048
         const val SAVE_SETTLE_MS = 700L
     }
 }

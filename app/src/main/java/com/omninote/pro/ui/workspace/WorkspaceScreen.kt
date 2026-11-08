@@ -7,6 +7,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Snackbar
@@ -56,6 +59,8 @@ fun WorkspaceScreen(
         val selection by vm.selection.collectAsState()
         val viewport by vm.viewport.collectAsState()
         val layers by vm.layers.collectAsState()
+        val readMode by vm.readMode.collectAsState()
+        val instrument by vm.instrument.collectAsState()
 
         var topBarVisible by rememberSaveable { mutableStateOf(true) }
         var studioSlot by remember { mutableStateOf<Int?>(null) }
@@ -93,11 +98,24 @@ fun WorkspaceScreen(
             }
         }
 
-        BackHandler(enabled = studioSlot != null || showLayers || showStencils) {
+        // Back is handled from the bottom up; the handler composed last (the modals) gets the gesture first.
+        // 3) nothing open: save the page and return to the library.
+        BackHandler(enabled = true) {
+            vm.flushAsync()
+            onBack()
+        }
+        // 2) a Lasso selection or an instrument on the page: dismiss that first.
+        BackHandler(enabled = selection != null || instrument != GeometryInstrument.NONE) {
+            if (selection != null) vm.lassoClear() else vm.setInstrument(instrument)
+        }
+        // 1) any modal or sheet.
+        BackHandler(enabled = studioSlot != null || showLayers || showStencils || showTemplates || showExport) {
             when {
                 studioSlot != null -> studioSlot = null
                 showLayers -> showLayers = false
-                else -> showStencils = false
+                showStencils -> showStencils = false
+                showTemplates -> showTemplates = false
+                else -> showExport = false
             }
         }
 
@@ -105,7 +123,7 @@ fun WorkspaceScreen(
         val pillAlignment = if (edge == DockEdge.BOTTOM || edge == DockEdge.RIGHT) Alignment.BottomStart else Alignment.BottomEnd
         val scrubberAlignment = if (edge == DockEdge.RIGHT) Alignment.CenterStart else Alignment.CenterEnd
 
-        Box(modifier.fillMaxSize().onSizeChanged { container = it }) {
+        Box(modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).onSizeChanged { container = it }) {
             InkCanvasHost(vm, Modifier.fillMaxSize(), pillAlignment, scrubberAlignment)
 
             AnimatedVisibility(
@@ -122,17 +140,20 @@ fun WorkspaceScreen(
                     saveStatus = saveStatus,
                     recorderStatus = recorder.status,
                     splitActive = splitActive,
-                    onBack = onBack,
+                    onBack = { vm.flushAsync(); onBack() },
                     onToggleStar = vm::toggleStarCurrentPage,
                     onTemplateSettings = { showTemplates = true },
                     onAudio = { showAudio = !showAudio },
                     onToggleSplit = onToggleSplit,
                     onExport = { showExport = true },
+                    readMode = readMode,
+                    onToggleRead = vm::toggleReadMode,
                     onCollapse = { topBarVisible = false }
                 )
             }
             if (!topBarVisible) {
-                TopBarRevealTab({ topBarVisible = true }, Modifier.align(Alignment.TopCenter))
+                // Top-right, never top-centre: HyperOS puts its multitasking dots there.
+                TopBarRevealTab({ topBarVisible = true }, Modifier.align(Alignment.TopEnd).padding(end = 16.dp))
             }
 
             if (showAudio) {
@@ -157,7 +178,7 @@ fun WorkspaceScreen(
                 onOpenPenStudio = { studioSlot = it },
                 onOpenStencils = { showStencils = true },
                 onOpenLayers = { showLayers = true },
-                modifier = Modifier.padding(top = if (edge == DockEdge.TOP && topBarVisible) 60.dp else 0.dp)
+                modifier = Modifier.padding(top = if (edge == DockEdge.TOP && topBarVisible) 72.dp else 0.dp)
             )
 
             SnackbarHost(

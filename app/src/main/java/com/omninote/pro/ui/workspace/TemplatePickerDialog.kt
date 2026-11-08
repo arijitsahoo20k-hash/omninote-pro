@@ -241,7 +241,7 @@ private fun formatMm1(v: Float) = String.format(Locale.US, "%.1f mm", v)
 
 /** The template drawn into a Compose canvas at the page's aspect ratio. */
 @Composable
-private fun TemplatePreview(
+internal fun TemplatePreview(
     renderer: ProceduralTemplateRenderer,
     config: TemplateConfig,
     widthMm: Float,

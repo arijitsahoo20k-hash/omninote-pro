@@ -31,6 +31,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -71,8 +72,25 @@ fun AudioSyncBar(vm: WorkspaceViewModel, onClose: () -> Unit, modifier: Modifier
     val hasAudio = pages.getOrNull(pageIndex)?.audioFilePath != null
     val recording = rec.status != RecorderStatus.IDLE
 
-    var mode by remember { mutableStateOf(if (hasAudio) AudioMode.REPLAY else AudioMode.RECORD) }
+    var mode by remember(pageIndex) { mutableStateOf(if (hasAudio) AudioMode.REPLAY else AudioMode.RECORD) }
+    var wasRecording by remember { mutableStateOf(false) }
+    LaunchedEffect(recording, hasAudio) {
+        if (recording) {
+            wasRecording = true
+        } else if (wasRecording && hasAudio) {
+            // Recording just finished: go straight to the playback controls.
+            mode = AudioMode.REPLAY
+            wasRecording = false
+        }
+    }
     val effectiveMode = if (recording) AudioMode.RECORD else mode
+
+    // The page only switches to ghost/glow replay rendering while the Replay controls are actually on screen.
+    val replayShown = effectiveMode == AudioMode.REPLAY && hasAudio
+    DisposableEffect(replayShown) {
+        vm.setAudioReplayVisible(replayShown)
+        onDispose { vm.setAudioReplayVisible(false) }
+    }
 
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) vm.toggleRecording()

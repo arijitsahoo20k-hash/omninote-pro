@@ -45,23 +45,49 @@ class AudioSyncPlayer(private val scope: CoroutineScope) {
 
     val durationMillis: Long get() = durationMs
 
-    /** Loads [file] paused at 0. Returns false if the file is missing or unreadable. */
+    private var prepared = false
+    private var pendingPlay = false
+    private var pendingSeekMs = -1L
+
+    /**
+     * Loads [file] paused at 0 without blocking the main thread: the player prepares asynchronously and the position
+     * flow flips to 0 straight away so the replay controls can appear. Returns false if the file is missing or unreadable.
+     */
     fun load(file: File): Boolean {
         unload()
         if (!file.isFile || file.length() == 0L) return false
         return try {
             val p = MediaPlayer()
+            player = p
+            prepared = false
             p.setDataSource(file.absolutePath)
-            p.prepare()
-            p.setOnCompletionListener {
+            p.setOnPreparedListener { mp ->
+                if (player !== mp) return@setOnPreparedListener
+                prepared = true
+                durationMs = try { mp.duration.toLong().coerceAtLeast(0L) } catch (_: Exception) { 0L }
+                if (pendingSeekMs >= 0L) {
+                    val t = pendingSeekMs.coerceIn(0L, durationMs)
+                    pendingSeekMs = -1L
+                    try { mp.seekTo(t.toInt()) } catch (_: Exception) { }
+                    _position.value = t
+                }
+                if (pendingPlay) {
+                    pendingPlay = false
+                    play()
+                }
+            }
+            p.setOnErrorListener { mp, _, _ ->
+                if (player === mp) unload()
+                true
+            }
+            p.setOnCompletionListener { mp ->
+                if (player !== mp) return@setOnCompletionListener
                 stopTicker()
                 _playing.value = false
                 _position.value = durationMs
             }
-            player = p
-            durationMs = p.duration.toLong().coerceAtLeast(0L)
             _position.value = 0L
-            applySpeed(_speed.value)
+            p.prepareAsync()
             true
         } catch (_: Throwable) {
             unload()
@@ -71,44 +97,57 @@ class AudioSyncPlayer(private val scope: CoroutineScope) {
 
     fun play() {
         val p = player ?: return
+        if (!prepared) {
+            pendingPlay = true
+            return
+        }
         if (_playing.value) return
         try {
             if (durationMs > 0L && p.currentPosition >= durationMs - END_EPSILON_MS) p.seekTo(0)
             p.start()
-            applySpeed(_speed.value)
             _playing.value = true
+            // Some HyperOS codecs throw if playbackParams are set before playback has started, so only now.
+            applySpeed(_speed.value)
             startTicker()
-        } catch (_: IllegalStateException) {
+        } catch (_: Exception) {
             unload()
         }
     }
 
     fun pause() {
+        pendingPlay = false
         val p = player ?: return
         stopTicker()
         try {
-            if (p.isPlaying) p.pause()
-            _position.value = p.currentPosition.toLong()
-        } catch (_: IllegalStateException) {
+            if (prepared) {
+                if (p.isPlaying) p.pause()
+                _position.value = p.currentPosition.toLong()
+            }
+        } catch (_: Exception) {
         }
         _playing.value = false
     }
 
     fun seekTo(ms: Long) {
         val p = player ?: return
+        if (!prepared) {
+            pendingSeekMs = ms.coerceAtLeast(0L)
+            _position.value = pendingSeekMs
+            return
+        }
         val target = ms.coerceIn(0L, durationMs)
         try {
             p.seekTo(target.toInt())
             _position.value = target
-        } catch (_: IllegalStateException) {
+        } catch (_: Exception) {
         }
     }
 
-    /** Clamped to 0.75x..2.0x. Takes effect immediately, including while playing. */
+    /** Clamped to 0.75x..2.0x. Applies immediately while playing, otherwise on the next play(). */
     fun setSpeed(speed: Float) {
         val s = speed.coerceIn(MIN_SPEED, MAX_SPEED)
         _speed.value = s
-        applySpeed(s)
+        if (_playing.value) applySpeed(s)
     }
 
     /**
@@ -146,6 +185,9 @@ class AudioSyncPlayer(private val scope: CoroutineScope) {
         } catch (_: RuntimeException) {
         }
         player = null
+        prepared = false
+        pendingPlay = false
+        pendingSeekMs = -1L
         durationMs = 0L
         _playing.value = false
         _position.value = null
@@ -155,24 +197,22 @@ class AudioSyncPlayer(private val scope: CoroutineScope) {
 
     private fun applySpeed(s: Float) {
         val p = player ?: return
+        if (!prepared || !_playing.value) return
         try {
-            val wasPlaying = p.isPlaying
             p.playbackParams = PlaybackParams().setSpeed(s)
-            // Setting playbackParams can start a paused player on some devices; restore the state.
-            if (!wasPlaying && p.isPlaying) p.pause()
-        } catch (_: IllegalStateException) {
-        } catch (_: IllegalArgumentException) {
+        } catch (_: Exception) {
+            // Unsupported rate on this codec: keep playing at normal speed.
         }
     }
 
     private fun startTicker() {
         stopTicker()
-        ticker = scope.launch {
+        ticker = scope.launch(kotlinx.coroutines.Dispatchers.Main.immediate) {
             while (isActive) {
                 val p = player ?: break
                 try {
                     _position.value = min(p.currentPosition.toLong(), durationMs)
-                } catch (_: IllegalStateException) {
+                } catch (_: Exception) {
                     break
                 }
                 delay(TICK_MS)

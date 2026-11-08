@@ -117,9 +117,60 @@ class InteractiveRulerOverlay(
     private var rawAngleDeg = 0f
     private var haveBaseline = false
 
-    /** Returns true if the event belongs to an instrument manipulation and must not reach other handlers. */
+    /** Set by the host so the toolbar state follows the on-instrument close button. */
+    var onClosed: ((InstrumentKind) -> Unit)? = null
+
+    private var knobKind: InstrumentKind? = null
+    private var knobPointerId = -1
+
+    /**
+     * Returns true if the event belongs to an instrument manipulation and must not reach other handlers.
+     *
+     * Knobs (rotate/resize, close) answer to a finger OR the stylus, so one pointer can do everything. The body drags
+     * with a finger; a stylus on the body is left alone because it draws along the instrument edge.
+     */
     fun onTouch(event: MotionEvent, viewport: ViewportTransform): Boolean {
         val action = event.actionMasked
+        val activeKnob = knobKind
+        if (activeKnob != null) {
+            val idx = event.findPointerIndex(knobPointerId)
+            when (action) {
+                MotionEvent.ACTION_MOVE -> if (idx >= 0) {
+                    val out = FloatArray(2)
+                    viewport.screenToPage(event.getX(idx), event.getY(idx), out)
+                    dragKnob(activeKnob, out[0], out[1])
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP -> {
+                    if (action != MotionEvent.ACTION_POINTER_UP || event.getPointerId(event.actionIndex) == knobPointerId) {
+                        knobKind = null
+                        knobPointerId = -1
+                        clearHud()
+                    }
+                }
+            }
+            return true
+        }
+        if (action == MotionEvent.ACTION_DOWN && hasVisible) {
+            val out = FloatArray(2)
+            viewport.screenToPage(event.x, event.y, out)
+            val hitR = max(KNOB_HIT_MM, KNOB_HIT_PX / viewport.pxPerMm)
+            for (kind in InstrumentKind.values()) {
+                if (!isVisible(kind)) continue
+                val close = closeKnob(kind)
+                if (hypot(out[0] - close[0], out[1] - close[1]) <= hitR) {
+                    setVisible(kind, false)
+                    onClosed?.invoke(kind)
+                    return true
+                }
+                val rot = rotateKnob(kind)
+                if (hypot(out[0] - rot[0], out[1] - rot[1]) <= hitR) {
+                    knobKind = kind
+                    knobPointerId = event.getPointerId(0)
+                    dragKnob(kind, out[0], out[1])
+                    return true
+                }
+            }
+        }
         if (action == MotionEvent.ACTION_DOWN) {
             if (!hasVisible || event.getToolType(0) != MotionEvent.TOOL_TYPE_FINGER) return false
             val out = FloatArray(2)
@@ -146,6 +197,72 @@ class InteractiveRulerOverlay(
         }
         return true
     }
+
+    private fun isVisible(kind: InstrumentKind): Boolean = when (kind) {
+        InstrumentKind.RULER -> ruler.visible
+        InstrumentKind.PROTRACTOR -> protractor.visible
+        InstrumentKind.COMPASS -> compass.visible
+    }
+
+    private fun rotateKnob(kind: InstrumentKind): FloatArray = when (kind) {
+        InstrumentKind.RULER -> {
+            val a = Math.toRadians(ruler.angleDeg.toDouble())
+            val d = ruler.lengthMm / 2f + KNOB_GAP_MM
+            floatArrayOf(ruler.cx + d * cos(a).toFloat(), ruler.cy + d * sin(a).toFloat())
+        }
+        InstrumentKind.PROTRACTOR -> {
+            val a = Math.toRadians(protractor.angleDeg.toDouble())
+            val d = protractor.radiusMm + KNOB_GAP_MM
+            floatArrayOf(protractor.cx + d * cos(a).toFloat(), protractor.cy + d * sin(a).toFloat())
+        }
+        InstrumentKind.COMPASS -> compassTip()
+    }
+
+    private fun closeKnob(kind: InstrumentKind): FloatArray = when (kind) {
+        InstrumentKind.RULER -> {
+            val a = Math.toRadians(ruler.angleDeg.toDouble())
+            val d = ruler.lengthMm / 2f + KNOB_GAP_MM
+            floatArrayOf(ruler.cx - d * cos(a).toFloat(), ruler.cy - d * sin(a).toFloat())
+        }
+        InstrumentKind.PROTRACTOR -> {
+            val a = Math.toRadians(protractor.angleDeg.toDouble())
+            val d = protractor.radiusMm + KNOB_GAP_MM
+            floatArrayOf(protractor.cx - d * cos(a).toFloat(), protractor.cy - d * sin(a).toFloat())
+        }
+        InstrumentKind.COMPASS -> floatArrayOf(compass.px - KNOB_GAP_MM, compass.py - KNOB_GAP_MM)
+    }
+
+    /** One pointer on the rotate/resize knob: the instrument swings to point at the pointer and grows to reach it. */
+    private fun dragKnob(kind: InstrumentKind, x: Float, y: Float) {
+        when (kind) {
+            InstrumentKind.RULER -> {
+                val dx = x - ruler.cx
+                val dy = y - ruler.cy
+                val deg = snapDeg(Math.toDegrees(atan2(dy, dx).toDouble()).toFloat())
+                ruler = ruler.copy(angleDeg = deg, lengthMm = (2f * (hypot(dx, dy) - KNOB_GAP_MM)).coerceIn(RULER_MIN_MM, RULER_MAX_MM))
+                hud = fmtLen(ruler.lengthMm) + "  ∠ " + fmtDeg(-ruler.angleDeg)
+            }
+            InstrumentKind.PROTRACTOR -> {
+                val dx = x - protractor.cx
+                val dy = y - protractor.cy
+                val deg = snapDeg(Math.toDegrees(atan2(dy, dx).toDouble()).toFloat())
+                protractor = protractor.copy(angleDeg = deg, radiusMm = (hypot(dx, dy) - KNOB_GAP_MM).coerceIn(PROTRACTOR_MIN_MM, PROTRACTOR_MAX_MM))
+                hud = "r " + fmtLen(protractor.radiusMm) + "  ∠ " + fmtDeg(-protractor.angleDeg)
+            }
+            InstrumentKind.COMPASS -> {
+                val dx = x - compass.px
+                val dy = y - compass.py
+                val deg = snapDeg(Math.toDegrees(atan2(dy, dx).toDouble()).toFloat())
+                compass = compass.copy(angleDeg = deg, radiusMm = hypot(dx, dy).coerceIn(COMPASS_MIN_MM, COMPASS_MAX_MM))
+                hud = "r " + fmtLen(compass.radiusMm)
+            }
+        }
+        hudAnchor = anchorFor(kind)
+        publish()
+    }
+
+    private fun snapDeg(raw: Float): Float =
+        Math.toDegrees(GeometricSnapClassifier.snapAngle(Math.toRadians(raw.toDouble()).toFloat()).toDouble()).toFloat()
 
     private fun setBaseline(event: MotionEvent, viewport: ViewportTransform, excludeIndex: Int = -1) {
         val idx = IntArray(2)
@@ -463,9 +580,77 @@ class InteractiveRulerOverlay(
         if (s.ruler.visible) drawRuler(canvas, s.ruler, dark, ink, px)
         if (s.protractor.visible) drawProtractor(canvas, s.protractor, dark, ink, px)
         if (s.compass.visible) drawCompass(canvas, s.compass, s.sweepStartDeg, s.sweepDeg, dark, ink, px)
+        drawKnobs(canvas, s, dark, px)
         val text = s.hud
         val at = s.hudAnchor
         if (text != null && at != null) drawHud(canvas, text, at[0], at[1], ctx.pxPerMm)
+    }
+
+    private val knobPath = android.graphics.Path()
+
+    private fun drawKnobs(canvas: Canvas, s: Snapshot, dark: Boolean, px: Float) {
+        if (s.ruler.visible) {
+            val a = Math.toRadians(s.ruler.angleDeg.toDouble())
+            val d = s.ruler.lengthMm / 2f + KNOB_GAP_MM
+            val ux = cos(a).toFloat()
+            val uy = sin(a).toFloat()
+            drawRotateKnob(canvas, s.ruler.cx + d * ux, s.ruler.cy + d * uy, dark, px)
+            drawCloseKnob(canvas, s.ruler.cx - d * ux, s.ruler.cy - d * uy, dark, px)
+        }
+        if (s.protractor.visible) {
+            val a = Math.toRadians(s.protractor.angleDeg.toDouble())
+            val d = s.protractor.radiusMm + KNOB_GAP_MM
+            val ux = cos(a).toFloat()
+            val uy = sin(a).toFloat()
+            drawRotateKnob(canvas, s.protractor.cx + d * ux, s.protractor.cy + d * uy, dark, px)
+            drawCloseKnob(canvas, s.protractor.cx - d * ux, s.protractor.cy - d * uy, dark, px)
+        }
+        if (s.compass.visible) {
+            val a = Math.toRadians(s.compass.angleDeg.toDouble())
+            val tx = s.compass.px + s.compass.radiusMm * cos(a).toFloat()
+            val ty = s.compass.py + s.compass.radiusMm * sin(a).toFloat()
+            drawRotateKnob(canvas, tx, ty, dark, px)
+            drawCloseKnob(canvas, s.compass.px - KNOB_GAP_MM, s.compass.py - KNOB_GAP_MM, dark, px)
+        }
+    }
+
+    private fun knobRadius(px: Float) = max(KNOB_R_MM, 15f * px)
+
+    private fun drawRotateKnob(canvas: Canvas, cx: Float, cy: Float, dark: Boolean, px: Float) {
+        val r = knobRadius(px)
+        fillPaint.style = Paint.Style.FILL
+        fillPaint.color = 0xFFD9845B.toInt()
+        canvas.drawCircle(cx, cy, r, fillPaint)
+        linePaint.style = Paint.Style.STROKE
+        linePaint.strokeWidth = 1.6f * px
+        linePaint.color = if (dark) 0xFFFFF1DC.toInt() else 0xFFFFFFFF.toInt()
+        rect.set(cx - r * 0.55f, cy - r * 0.55f, cx + r * 0.55f, cy + r * 0.55f)
+        canvas.drawArc(rect, 30f, 290f, false, linePaint)
+        // arrow head at the arc's open end
+        val ex = cx + r * 0.55f * cos(Math.toRadians(30.0)).toFloat()
+        val ey = cy + r * 0.55f * sin(Math.toRadians(30.0)).toFloat()
+        knobPath.reset()
+        knobPath.moveTo(ex - r * 0.32f, ey - r * 0.05f)
+        knobPath.lineTo(ex + r * 0.22f, ey - r * 0.2f)
+        knobPath.lineTo(ex + r * 0.05f, ey + r * 0.34f)
+        knobPath.close()
+        fillPaint.color = linePaint.color
+        canvas.drawPath(knobPath, fillPaint)
+    }
+
+    private fun drawCloseKnob(canvas: Canvas, cx: Float, cy: Float, dark: Boolean, px: Float) {
+        val r = knobRadius(px)
+        fillPaint.style = Paint.Style.FILL
+        fillPaint.color = if (dark) 0xFF4A3F38.toInt() else 0xFF6B5A4C.toInt()
+        canvas.drawCircle(cx, cy, r, fillPaint)
+        linePaint.style = Paint.Style.STROKE
+        linePaint.strokeWidth = 1.8f * px
+        linePaint.strokeCap = Paint.Cap.ROUND
+        linePaint.color = 0xFFFFF1DC.toInt()
+        val k = r * 0.38f
+        canvas.drawLine(cx - k, cy - k, cx + k, cy + k, linePaint)
+        canvas.drawLine(cx - k, cy + k, cx + k, cy - k, linePaint)
+        linePaint.strokeCap = Paint.Cap.BUTT
     }
 
     private fun glass(dark: Boolean) = if (dark) 0x30FFFFFF else 0x40FFF6E8
@@ -650,6 +835,10 @@ class InteractiveRulerOverlay(
 
     private companion object {
         const val RULER_WIDTH_MM = 28f
+        const val KNOB_GAP_MM = 8f
+        const val KNOB_R_MM = 5f
+        const val KNOB_HIT_MM = 9f
+        const val KNOB_HIT_PX = 44f
         const val RULER_MIN_MM = 40f
         const val RULER_MAX_MM = 300f
         const val PROTRACTOR_MIN_MM = 20f

@@ -10,6 +10,7 @@ import android.view.MotionEvent
 import com.omninote.pro.core.model.AffineTransform2D
 import com.omninote.pro.core.model.BrushType
 import com.omninote.pro.core.model.NotebookPage
+import com.omninote.pro.core.model.ImageElement
 import com.omninote.pro.core.model.PageElement
 import com.omninote.pro.core.model.PointMm
 import com.omninote.pro.core.model.SpatialItemKind
@@ -56,7 +57,7 @@ import kotlin.math.sin
  * change is committed as ONE [TransformElements] step (the same live-edit-then-coalesce pattern as the eraser).
  *
  * Handles: 4 corners scale uniformly, 4 edges scale along the frame axis, the stem handle rotates with 15 degree
- * magnetic detents, the interior drags. Stencils, images and text boxes follow the uniform part of a non-uniform
+ * magnetic detents, the interior drags. Stencils and images stretch non-uniformly with the edge handles; text boxes follow the uniform part of a non-uniform
  * scale (see ElementTransforms); strokes and shapes follow it exactly.
  */
 class LassoController(
@@ -109,6 +110,9 @@ class LassoController(
 
     /** When false only the active layer is selectable; the Vertical Space Shifter always uses every editable layer. */
     var acrossLayers: Boolean = false
+
+    /** Fired whenever the selection or its frame changes, so hosts can react without polling. */
+    var onSelectionChanged: (() -> Unit)? = null
 
     private val selected = LinkedHashSet<String>()
     val selectionIds: Set<String> get() = selected
@@ -198,9 +202,23 @@ class LassoController(
             Drag.LOOP -> {
                 drag = Drag.NONE
                 if (!cancelled) {
-                    val poly = LassoGeometry.simplify(loopX, loopY, loopCount, 0.6f, MAX_LOOP_VERTICES)
-                    outline = poly
-                    selectWithin(poly)
+                    var minX = Float.MAX_VALUE
+                    var maxX = -Float.MAX_VALUE
+                    var minY = Float.MAX_VALUE
+                    var maxY = -Float.MAX_VALUE
+                    for (k in 0 until loopCount) {
+                        minX = min(minX, loopX[k]); maxX = max(maxX, loopX[k])
+                        minY = min(minY, loopY[k]); maxY = max(maxY, loopY[k])
+                    }
+                    val isTap = loopCount <= 3 || (maxX - minX < TAP_EXTENT_MM && maxY - minY < TAP_EXTENT_MM)
+                    if (isTap && loopCount > 0) {
+                        // A tap, not a loop: pick the stencil / image / text box under the pen if there is one.
+                        tapSelect(loopX[0], loopY[0], viewPxPerMm)
+                    } else {
+                        val poly = LassoGeometry.simplify(loopX, loopY, loopCount, 0.6f, MAX_LOOP_VERTICES)
+                        outline = poly
+                        selectWithin(poly)
+                    }
                 }
                 loopCount = 0
             }
@@ -241,11 +259,9 @@ class LassoController(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (f == null || selected.isEmpty() || event.pointerCount != 1 || drag != Drag.NONE) return false
-                val stylus = event.getToolType(0).let {
-                    it == MotionEvent.TOOL_TYPE_STYLUS || it == MotionEvent.TOOL_TYPE_ERASER || it == MotionEvent.TOOL_TYPE_MOUSE
-                }
                 val h = hitHandle(f, viewport, event.x, event.y)
-                val inside = h < 0 && stylus && insideFrame(f, viewport, event.x, event.y)
+                // Pen or finger inside the frame moves the selection, so a placed stencil or image can be dragged anywhere.
+                val inside = h < 0 && insideFrame(f, viewport, event.x, event.y)
                 if (h < 0 && !inside) return false
                 val out = FloatArray(2)
                 viewport.screenToPage(event.x, event.y, out)
@@ -478,6 +494,33 @@ class LassoController(
         outline = null
         recomputeFrame(page)
         publish()
+    }
+
+    /**
+     * Selects the top-most stencil, image or text box whose box contains the page point, so a placed element can be
+     * moved or resized with a single tap and no loop around it. Returns true when something was selected.
+     */
+    fun tapSelect(xMm: Float, yMm: Float, pxPerMm: Float): Boolean {
+        if (!enabled) return false
+        val page = host.page ?: return false
+        val slop = max(1.5f, 10f / max(pxPerMm, 0.1f))
+        for (layer in page.layers.filter { it.isEditable }.sortedByDescending { it.zIndex }) {
+            val candidates = ArrayList<PageElement>(layer.textBoxes.size + layer.stencils.size + layer.images.size)
+            candidates.addAll(layer.images)
+            candidates.addAll(layer.stencils)
+            candidates.addAll(layer.textBoxes)
+            for (k in candidates.indices.reversed()) {
+                val e = candidates[k]
+                if (!filter.accepts(e)) continue
+                if (e is ImageElement && e.isLockedToBackground) continue
+                val b = e.spatialBounds
+                if (xMm >= b.left - slop && xMm <= b.right + slop && yMm >= b.top - slop && yMm <= b.bottom + slop) {
+                    select(listOf(e.id))
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     fun selectAll() {
@@ -796,6 +839,7 @@ class LassoController(
             activeHandle = if (isTransformDrag()) handle else -1
         )
         host.requestOverlay()
+        onSelectionChanged?.invoke()
     }
 
     /** Draws on the front buffer; the canvas matrix already maps page mm to pixels. */
@@ -975,6 +1019,7 @@ class LassoController(
 
     private companion object {
         const val HANDLE_MOVE = 100
+        const val TAP_EXTENT_MM = 1.5f
         const val HANDLE_ROTATE = 8
         const val MIN_SCALE = 0.05f
         const val MAX_SCALE = 50f

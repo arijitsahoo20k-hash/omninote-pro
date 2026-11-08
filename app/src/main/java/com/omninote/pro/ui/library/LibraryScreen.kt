@@ -10,7 +10,18 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -137,17 +148,26 @@ fun LibraryScreen(
 
         val folderNames = remember(folders) { folders.associate { it.folderId to it.name } }
 
-        Box(modifier.fillMaxSize().background(LibraryBackground)) {
-            Row(Modifier.fillMaxSize()) {
+        BoxWithConstraints(modifier.fillMaxSize().background(LibraryBackground).windowInsetsPadding(WindowInsets.systemBars)) {
+            // Below 720dp (split-screen halves, phones) the sidebar becomes a drawer behind a hamburger.
+            val compact = maxWidth < 720.dp
+            val drawerState = rememberDrawerState(DrawerValue.Closed)
+            val scope = rememberCoroutineScope()
+
+            BackHandler(enabled = compact && drawerState.currentValue == DrawerValue.Open) {
+                scope.launch { drawerState.close() }
+            }
+
+            val sidebar: @Composable (Boolean) -> Unit = { inDrawer ->
                 Sidebar(
-                    open = sidebarOpen,
+                    open = inDrawer || sidebarOpen,
                     section = section,
                     folders = folders,
                     tags = tags.map { it.name },
                     activeTags = activeTags,
                     total = total,
-                    onToggle = { sidebarOpen = !sidebarOpen },
-                    onSection = vm::showSection,
+                    onToggle = { if (inDrawer) scope.launch { drawerState.close() } else sidebarOpen = !sidebarOpen },
+                    onSection = { vm.showSection(it); if (inDrawer) scope.launch { drawerState.close() } },
                     onToggleTag = vm::toggleTag,
                     onClearTags = vm::clearTags,
                     onNewFolder = { dialog = Dlg.NewFolder(it) },
@@ -155,14 +175,18 @@ fun LibraryScreen(
                     onMoveFolder = { dialog = Dlg.MoveFolder(it) },
                     onDeleteFolder = { dialog = Dlg.DeleteFolder(it) }
                 )
-                Column(Modifier.weight(1f).fillMaxHeight().padding(horizontal = 18.dp, vertical = 14.dp)) {
+            }
+
+            val mainColumn: @Composable (Modifier) -> Unit = { m ->
+                Column(m.fillMaxHeight().padding(horizontal = if (compact) 12.dp else 18.dp, vertical = 14.dp)) {
                     TopRow(
                         query = query,
                         onQuery = vm::setQuery,
                         onNew = { dialog = Dlg.NewNotebook },
                         onImportPdf = { pdfPicker.launch(arrayOf("application/pdf")) },
                         onImportArchive = { archivePicker.launch(arrayOf("*/*")) },
-                        onSettings = onOpenSettings
+                        onSettings = onOpenSettings,
+                        onMenu = if (compact) ({ scope.launch { drawerState.open() } }) else null
                     )
                     Box(Modifier.height(12.dp))
                     val results = search
@@ -184,6 +208,38 @@ fun LibraryScreen(
                         }
                     }
                 }
+            }
+
+            if (compact) {
+                ModalNavigationDrawer(
+                    drawerState = drawerState,
+                    drawerContent = {
+                        ModalDrawerSheet(drawerContainerColor = Color(0xFF1A1613), modifier = Modifier.width(300.dp)) { sidebar(true) }
+                    }
+                ) {
+                    mainColumn(Modifier.fillMaxSize())
+                }
+            } else {
+                Row(Modifier.fillMaxSize()) {
+                    sidebar(false)
+                    mainColumn(Modifier.weight(1f))
+                }
+            }
+
+            // Always reachable, whatever the width: the new-notebook button.
+            Row(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(20.dp)
+                    .glass(RoundedCornerShape(50), raised = true, elevation = 14.dp)
+                    .background(Warm.Accent, RoundedCornerShape(50))
+                    .clickable { dialog = Dlg.NewNotebook }
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Rounded.Add, "New notebook", tint = Color(0xFF2A1A10))
+                Text("New Notebook", color = Color(0xFF2A1A10), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
 
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(16.dp)) { data ->
@@ -382,9 +438,13 @@ private fun TopRow(
     onNew: () -> Unit,
     onImportPdf: () -> Unit,
     onImportArchive: () -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    onMenu: (() -> Unit)? = null
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (onMenu != null) {
+            ToolButton(selected = false, onClick = onMenu, size = 44.dp) { Icon(Icons.Rounded.Menu, "Open menu", tint = Warm.Text) }
+        }
         Row(
             Modifier
                 .weight(1f)
@@ -397,7 +457,7 @@ private fun TopRow(
                 com.omninote.pro.ui.workspace.PanelTextField(query, "Search titles, tags and handwriting", Modifier, onQuery)
             }
         }
-        ChipButton("New notebook", true, onNew)
+        if (onMenu == null) ChipButton("New notebook", true, onNew)
         ToolButton(selected = false, onClick = onImportPdf, size = 44.dp) { Icon(Icons.Rounded.PictureAsPdf, "Import PDF textbook", tint = Warm.Text) }
         ToolButton(selected = false, onClick = onImportArchive, size = 44.dp) { Icon(Icons.Rounded.Unarchive, "Import .omninote archive", tint = Warm.Text) }
         ToolButton(selected = false, onClick = onSettings, size = 44.dp) { Icon(Icons.Rounded.Settings, "Settings", tint = Warm.Text) }
