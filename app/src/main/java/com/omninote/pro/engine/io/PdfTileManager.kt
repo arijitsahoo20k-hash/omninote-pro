@@ -42,25 +42,26 @@ import kotlin.math.min
 import kotlin.math.pow
 
 /**
- * High-fps, memory-bounded PDF page and tile renderer for the dry layer.
+ * High-fps, memory-bounded PDF page renderer for the dry layer, in two layers and no tile grid.
  *
  * Threading: [PdfRenderer] allows one open page per file descriptor, so every `openPage`/`render` runs on ONE
- * dedicated thread under a [Mutex] that also guards open and close. [draw] is called from the render thread every
- * frame; it only reads caches and enqueues work, and never blocks on PDF rendering.
+ * dedicated thread under a [Mutex] that also guards open and close. [draw] only reads caches and enqueues work; it
+ * never blocks on PDF rendering.
  *
- * Tier 1: a full-page bitmap about [BASE_WIDTH_PX] wide per page, in an [LruCache]; it is drawn first so scrolling or
- * zooming never shows blank paper.
+ * Layer 1: the whole page rendered once at [BASE_LONG_EDGE_PX] on its longest edge (ARGB_8888, pre-filled white) and
+ * kept in an [LruCache]. It is drawn first, so the full page is always visible with nothing missing.
  *
- * Tier 2: once zoom exceeds [TILE_ZOOM_THRESHOLD], the visible part of the page is covered with
- * [TILE_PX] x [TILE_PX] tiles rendered at a quantised on-screen scale (steps of 1.5x, so tiles are reused while
- * pinching). Tiles that are no longer wanted are cancelled before they start; [onTileReady] fires (from the PDF
- * thread) whenever a page or tile lands, so the view can redraw.
+ * Layer 2: once zoom exceeds [REGION_ZOOM_THRESHOLD] and the viewport has been still ([gestureActive] is false, which
+ * the host clears ~120 ms after the last gesture frame), ONE bitmap covering the visible rectangle (plus a small
+ * margin) is rendered at the on-screen resolution and swapped in atomically when finished. The previous region stays
+ * on screen until the new one is ready, and nothing is ever recycled by hand: evicted bitmaps are left to the GC, so
+ * a bitmap a frame still references can never be "used after recycle".
  */
 class PdfTileManager(
     private val context: Context,
     private val scope: CoroutineScope,
-    baseCacheBytes: Int = defaultBudget(0.06f, 48),
-    tileCacheBytes: Int = defaultBudget(0.10f, 96)
+    baseCacheBytes: Int = defaultBudget(0.10f, 72),
+    tileCacheBytes: Int = defaultBudget(0.14f, 96)
 ) {
     /** Invoked on the PDF render thread when new pixels are available. Marshal to the UI thread and redraw. */
     @Volatile
@@ -73,7 +74,18 @@ class PdfTileManager(
     }
 
     private data class PageKey(val notebookId: String, val pageIndex: Int)
-    private data class TileKey(val notebookId: String, val pageIndex: Int, val level: Int, val col: Int, val row: Int)
+    /** The high-resolution layer for one page: [bitmap] covers page-space rectangle [left,top]..[right,bottom] mm. */
+    private class Region(
+        val bitmap: Bitmap,
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+        /** Raster density in px per mm. */
+        val scale: Float
+    )
+
+    private data class RegionSpec(val left: Float, val top: Float, val right: Float, val bottom: Float, val scale: Float)
 
     private val renderThread: ExecutorCoroutineDispatcher =
         Executors.newSingleThreadExecutor { r -> Thread(r, "pdf-render").apply { priority = Thread.NORM_PRIORITY - 1 } }
@@ -87,19 +99,19 @@ class PdfTileManager(
     private val baseCache = object : LruCache<PageKey, Bitmap>(baseCacheBytes) {
         override fun sizeOf(key: PageKey, value: Bitmap): Int = value.allocationByteCount
     }
-    private val tileCache = object : LruCache<TileKey, Bitmap>(tileCacheBytes) {
-        override fun sizeOf(key: TileKey, value: Bitmap): Int = value.allocationByteCount
+    private val regionCache = object : LruCache<PageKey, Region>(tileCacheBytes) {
+        override fun sizeOf(key: PageKey, value: Region): Int = value.bitmap.allocationByteCount
     }
+    /** Largest region raster, in pixels, that still leaves room for a second one in [regionCache]. */
+    private val maxRegionPixels: Int = min(MAX_REGION_PIXELS, max(1_000_000, tileCacheBytes / 8))
 
     private val basePending = HashMap<PageKey, Job>()
-    private val tilePending = HashMap<TileKey, Job>()
-    @Volatile
-    private var wantedTiles: Set<TileKey> = emptySet()
+    private val regionPending = HashMap<PageKey, Job>()
+    private val regionWanted = HashMap<PageKey, RegionSpec>()
 
     /**
-     * True while a pinch or pan is in progress (and for a short moment after). The tile tier is suppressed then:
-     * only the cached full-page bitmap is drawn and no new high-DPI render jobs are started, which keeps zooming
-     * smooth. The host clears it ~120 ms after the gesture settles and redraws.
+     * True while a pinch or pan is in progress (and for a short moment after). No new high-resolution region job is
+     * started then, which keeps zooming smooth. The host clears it ~120 ms after the gesture settles and redraws.
      */
     @Volatile
     var gestureActive: Boolean = false
@@ -137,71 +149,57 @@ class PdfTileManager(
             requestBase(baseKey, doc, page.widthMm, page.heightMm)
         }
 
-        if (zoom <= TILE_ZOOM_THRESHOLD || pxPerMm <= 0f) {
-            cancelTilesNotIn(emptySet())
+        if (pxPerMm <= 0f || zoom <= 1f) {
+            cancelRegion(baseKey)
             return
         }
-        if (gestureActive) return // Tier 1 only while the user is pinching or panning.
-        drawTiles(canvas, page, doc, pdfIndex, viewportMm, pxPerMm, zoom)
+        drawRegion(canvas, page, doc, baseKey, viewportMm, pxPerMm, zoom)
     }
 
-    private fun drawTiles(
+    private fun drawRegion(
         canvas: Canvas,
         page: NotebookPage,
         doc: OpenPdf,
-        pdfIndex: Int,
+        key: PageKey,
         viewportMm: StrokeBounds,
         pxPerMm: Float,
         zoom: Float
     ) {
-        val level = levelFor(zoom)
-        val basePx = pxPerMm / zoom
-        val scale = basePx * LEVEL_STEP.pow(level) // px per mm of the tile raster
-        val tileMm = TILE_PX / scale
-
         val left = max(0f, viewportMm.left)
         val top = max(0f, viewportMm.top)
         val right = min(page.widthMm, viewportMm.right)
         val bottom = min(page.heightMm, viewportMm.bottom)
-        if (left >= right || top >= bottom) {
-            cancelTilesNotIn(emptySet())
-            return
+        if (left >= right || top >= bottom) return
+
+        val current = regionCache.get(key)
+        // Keep showing the existing region (it is correct, just maybe smaller or softer) until a better one lands.
+        if (current != null) {
+            dest.set(current.left, current.top, current.right, current.bottom)
+            canvas.drawBitmap(current.bitmap, null, dest, bitmapPaint)
         }
-        val c0 = floor(left / tileMm).toInt()
-        val c1 = ceil(right / tileMm).toInt() - 1
-        val r0 = floor(top / tileMm).toInt()
-        val r1 = ceil(bottom / tileMm).toInt() - 1
-        if ((c1 - c0 + 1) * (r1 - r0 + 1) > MAX_WANTED_TILES) {
-            cancelTilesNotIn(emptySet())
+        if (zoom <= REGION_ZOOM_THRESHOLD || gestureActive) return
+
+        val covers = current != null &&
+            current.left <= left + COVER_SLACK_MM && current.top <= top + COVER_SLACK_MM &&
+            current.right >= right - COVER_SLACK_MM && current.bottom >= bottom - COVER_SLACK_MM &&
+            current.scale >= pxPerMm * 0.8f
+        if (covers) {
+            cancelRegion(key)
             return
         }
 
-        val cx = (left + right) * 0.5f
-        val cy = (top + bottom) * 0.5f
-        val wanted = ArrayList<TileKey>((c1 - c0 + 1) * (r1 - r0 + 1))
-        for (r in r0..r1) for (c in c0..c1) wanted.add(TileKey(page.notebookId, pdfIndex, level, c, r))
-        wanted.sortBy { k ->
-            val dx = (k.col + 0.5f) * tileMm - cx
-            val dy = (k.row + 0.5f) * tileMm - cy
-            dx * dx + dy * dy
-        }
-        cancelTilesNotIn(wanted.toHashSet())
-
-        for (k in wanted) {
-            val bmp = tileCache.get(k)
-            val tl = k.col * tileMm
-            val tt = k.row * tileMm
-            if (bmp == null) {
-                requestTile(k, doc, page.widthMm, page.heightMm, scale)
-                continue
-            }
-            // Edge tiles stick out past the page; draw only the part inside it.
-            val visRight = min(tl + tileMm, page.widthMm)
-            val visBottom = min(tt + tileMm, page.heightMm)
-            src.set(0, 0, ((visRight - tl) * scale).toInt().coerceIn(1, TILE_PX), ((visBottom - tt) * scale).toInt().coerceIn(1, TILE_PX))
-            dest.set(tl, tt, visRight, visBottom)
-            canvas.drawBitmap(bmp, src, dest, bitmapPaint)
-        }
+        // Wanted region: the visible rectangle plus a margin so small pans stay covered, at on-screen resolution,
+        // scaled down only if the bitmap would exceed the pixel budget.
+        val mx = (right - left) * REGION_MARGIN
+        val my = (bottom - top) * REGION_MARGIN
+        val l = max(0f, left - mx)
+        val t = max(0f, top - my)
+        val r = min(page.widthMm, right + mx)
+        val b = min(page.heightMm, bottom + my)
+        var scale = pxPerMm
+        val pixels = (r - l) * scale * (b - t) * scale
+        if (pixels > maxRegionPixels) scale *= kotlin.math.sqrt(maxRegionPixels / pixels)
+        requestRegion(key, doc, page.widthMm, page.heightMm, RegionSpec(l, t, r, b, scale))
     }
 
     // =====================================================================================
@@ -277,36 +275,36 @@ class PdfTileManager(
         }
     }
 
-    private fun requestTile(key: TileKey, doc: OpenPdf, widthMm: Float, heightMm: Float, scale: Float) {
+    private fun requestRegion(key: PageKey, doc: OpenPdf, widthMm: Float, heightMm: Float, spec: RegionSpec) {
         synchronized(lock) {
-            if (tilePending.containsKey(key)) return
-            tilePending[key] = scope.launch(renderThread) {
+            val previous = regionWanted[key]
+            if (previous == spec && regionPending.containsKey(key)) return
+            regionWanted[key] = spec
+            // A stale job for a different rectangle is dropped before it starts rendering.
+            regionPending.remove(key)?.cancel()
+            regionPending[key] = scope.launch(renderThread) {
                 try {
-                    if (!isActive || key !in wantedTiles) return@launch
+                    if (!isActive) return@launch
                     val bmp = mutex.withLock {
-                        if (!isActive || key !in wantedTiles) null else renderTile(doc, key, widthMm, heightMm, scale)
+                        if (!isActive || synchronized(lock) { regionWanted[key] } != spec) null
+                        else renderRegion(doc, key.pageIndex, widthMm, heightMm, spec)
                     } ?: return@launch
-                    tileCache.put(key, bmp)
+                    // Atomic swap: the new region replaces the old one in a single put.
+                    regionCache.put(key, Region(bmp, spec.left, spec.top, spec.right, spec.bottom, spec.scale))
                     onTileReady?.invoke()
                 } finally {
-                    synchronized(lock) { tilePending.remove(key) }
+                    synchronized(lock) {
+                        if (regionWanted[key] == spec) regionPending.remove(key)
+                    }
                 }
             }
         }
     }
 
-    private fun cancelTilesNotIn(wanted: Set<TileKey>) {
+    private fun cancelRegion(key: PageKey) {
         synchronized(lock) {
-            wantedTiles = wanted
-            if (tilePending.isEmpty()) return
-            val it = tilePending.entries.iterator()
-            while (it.hasNext()) {
-                val e = it.next()
-                if (e.key !in wanted) {
-                    e.value.cancel()
-                    it.remove()
-                }
-            }
+            regionWanted.remove(key)
+            regionPending.remove(key)?.cancel()
         }
     }
 
@@ -316,8 +314,10 @@ class PdfTileManager(
 
     private fun renderBase(doc: OpenPdf, index: Int, widthMm: Float, heightMm: Float): Bitmap? {
         if (!isOpen(doc)) return null
-        val w = BASE_WIDTH_PX
-        val h = max(1, (BASE_WIDTH_PX * heightMm / widthMm).toInt())
+        val longest = max(widthMm, heightMm)
+        val k = BASE_LONG_EDGE_PX / longest
+        val w = max(1, (widthMm * k).toInt())
+        val h = max(1, (heightMm * k).toInt())
         return try {
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             bmp.eraseColor(Color.WHITE)
@@ -338,20 +338,22 @@ class PdfTileManager(
         }
     }
 
-    private fun renderTile(doc: OpenPdf, key: TileKey, widthMm: Float, heightMm: Float, scale: Float): Bitmap? {
+    private fun renderRegion(doc: OpenPdf, index: Int, widthMm: Float, heightMm: Float, spec: RegionSpec): Bitmap? {
         if (!isOpen(doc)) return null
+        val w = max(1, ceil((spec.right - spec.left) * spec.scale).toInt())
+        val h = max(1, ceil((spec.bottom - spec.top) * spec.scale).toInt())
         return try {
-            val bmp = Bitmap.createBitmap(TILE_PX, TILE_PX, Bitmap.Config.ARGB_8888)
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             bmp.eraseColor(Color.WHITE)
-            val page = doc.renderer.openPage(key.pageIndex)
+            val page = doc.renderer.openPage(index)
             try {
-                // Page points -> raster px at [scale] px/mm, then shift so this tile's corner is the bitmap origin.
-                val sx = widthMm * scale / doc.widthPts(key.pageIndex)
-                val sy = heightMm * scale / doc.heightPts(key.pageIndex)
+                // Page points -> raster px at spec.scale px/mm, then shift so the region's corner is the bitmap origin.
+                val sx = widthMm * spec.scale / doc.widthPts(index)
+                val sy = heightMm * spec.scale / doc.heightPts(index)
                 val m = Matrix()
                 m.setScale(sx, sy)
-                m.postTranslate(-(key.col * TILE_PX).toFloat(), -(key.row * TILE_PX).toFloat())
-                page.render(bmp, Rect(0, 0, TILE_PX, TILE_PX), m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                m.postTranslate(-spec.left * spec.scale, -spec.top * spec.scale)
+                page.render(bmp, null, m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
             } finally {
                 page.close()
             }
@@ -359,7 +361,7 @@ class PdfTileManager(
         } catch (e: Exception) {
             null
         } catch (e: OutOfMemoryError) {
-            tileCache.evictAll()
+            regionCache.evictAll()
             null
         }
     }
@@ -373,26 +375,34 @@ class PdfTileManager(
     /** Drops every cached bitmap (call from onTrimMemory). In-flight work simply repopulates later. */
     fun trimMemory() {
         baseCache.evictAll()
-        tileCache.evictAll()
+        regionCache.evictAll()
     }
 
     /** Closes one notebook's PDF and forgets its cached pixels. */
     fun closeNotebook(notebookId: String) {
         val doc = synchronized(lock) { docs.remove(notebookId) } ?: return
         baseCache.snapshot().keys.filter { it.notebookId == notebookId }.forEach { baseCache.remove(it) }
-        tileCache.snapshot().keys.filter { it.notebookId == notebookId }.forEach { tileCache.remove(it) }
+        regionCache.snapshot().keys.filter { it.notebookId == notebookId }.forEach { regionCache.remove(it) }
+        synchronized(lock) {
+            regionWanted.keys.removeAll { it.notebookId == notebookId }
+            regionPending.entries.removeAll { (k, j) -> (k.notebookId == notebookId).also { hit -> if (hit) j.cancel() } }
+        }
         closeDoc(notebookId, doc)
     }
 
     fun close() {
-        cancelTilesNotIn(emptySet())
+        synchronized(lock) {
+            regionWanted.clear()
+            regionPending.values.forEach { it.cancel() }
+            regionPending.clear()
+        }
         val all = synchronized(lock) {
             val copy = docs.entries.map { it.key to it.value }
             docs.clear()
             copy
         }
         baseCache.evictAll()
-        tileCache.evictAll()
+        regionCache.evictAll()
         for ((id, doc) in all) closeDoc(id, doc)
         renderThread.close()
     }
@@ -414,14 +424,12 @@ class PdfTileManager(
     }
 
     private companion object {
-        const val BASE_WIDTH_PX = 1080
-        const val TILE_PX = 512
-        const val TILE_ZOOM_THRESHOLD = 1.25f
-        const val LEVEL_STEP = 1.5f
-        const val MAX_WANTED_TILES = 80
+        const val BASE_LONG_EDGE_PX = 1600
+        const val REGION_ZOOM_THRESHOLD = 1.5f
+        const val REGION_MARGIN = 0.12f
+        const val COVER_SLACK_MM = 0.6f
+        const val MAX_REGION_PIXELS = 5_000_000
         const val MAX_OPEN_DOCS = 2
-
-        fun levelFor(zoom: Float): Int = max(1, ceil(ln(zoom) / ln(LEVEL_STEP)).toInt())
 
         fun defaultBudget(fractionOfHeap: Float, capMb: Int): Int =
             min((Runtime.getRuntime().maxMemory() * fractionOfHeap).toLong(), capMb * 1024L * 1024L).toInt()

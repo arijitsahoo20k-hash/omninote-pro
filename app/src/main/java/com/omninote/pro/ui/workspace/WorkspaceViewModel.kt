@@ -80,7 +80,9 @@ import com.omninote.pro.engine.ocr.OcrOutcome
 import com.omninote.pro.engine.stencils.InstrumentKind
 import com.omninote.pro.engine.stencils.InteractiveRulerOverlay
 import com.omninote.pro.engine.stencils.ScientificStencilRepository
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -1678,10 +1680,20 @@ class WorkspaceViewModel(
         val strokes: List<Stroke> = p.visibleLayers.flatMap { it.strokes }
             .filter { it.brush.type.isInk && it.brush.type != BrushType.HIGHLIGHTER && it.brush.type != BrushType.STUDY_TAPE }
         if (strokes.isEmpty()) return
-        deps.appScope.launch {
-            val outcome = deps.ocr.recognize(strokes)
-            if (outcome is OcrOutcome.Success && outcome.result.text.isNotBlank()) {
-                pageDao.indexPageText(p.id, notebookId, title, outcome.result.text)
+        // Best-effort and isolated: its own SupervisorJob child plus a handler, so an OCR or database failure here can
+        // never take the app down when switching pages, saving or leaving the workspace.
+        val isolated = deps.appScope.coroutineContext + SupervisorJob() +
+            CoroutineExceptionHandler { _, _ -> }
+        CoroutineScope(isolated).launch {
+            try {
+                val outcome = deps.ocr.recognize(strokes)
+                if (outcome is OcrOutcome.Success && outcome.result.text.isNotBlank()) {
+                    pageDao.indexPageText(p.id, notebookId, title, outcome.result.text)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Indexing is optional; ignore.
             }
         }
     }

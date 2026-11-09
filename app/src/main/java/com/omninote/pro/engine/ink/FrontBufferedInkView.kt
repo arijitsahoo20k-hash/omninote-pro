@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -188,6 +189,10 @@ class FrontBufferedInkView(
 
     /** "Lock Zoom": pinch and rotate are ignored, one- and two-finger panning still works. */
     var zoomLocked: Boolean = false
+
+    /** Fired (at most every 600 ms) when a pinch is blocked by [zoomLocked], so the UI can pulse its unlock control. */
+    var onLockedZoomAttempt: (() -> Unit)? = null
+    private var lastLockedAttemptMs = 0L
 
     /** Zooms about the view centre to [zoom] (clamped to the allowed range) and keeps the stack on the desk. */
     fun zoomTo(zoom: Float) {
@@ -386,7 +391,10 @@ class FrontBufferedInkView(
     private var switchPending = false
     private val clearSwitchPending = Runnable { switchPending = false }
     private var settleAnimator: ValueAnimator? = null
+    /** True from the first pinch/pan frame until [GESTURE_SETTLE_MS] after the last one. */
+    private var gestureInProgress = false
     private val gestureEndRunnable = Runnable {
+        gestureInProgress = false
         pdfTiles?.gestureActive = false
         requestDry()
     }
@@ -423,6 +431,7 @@ class FrontBufferedInkView(
         removeCallbacks(clearSwitchPending)
         settleAnimator?.cancel()
         settleAnimator = null
+        gestureInProgress = false
         pdfTiles?.gestureActive = false
         gestureJob?.cancel()
         gestureJob = null
@@ -433,7 +442,6 @@ class FrontBufferedInkView(
         laser.clear()
         eraserOverlay.clear()
         wetRenderer.clearCache()
-        dryBitmap?.recycle()
         dryBitmap = null
         dryCanvas = null
         dryViewport = null
@@ -448,7 +456,6 @@ class FrontBufferedInkView(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        dryBitmap?.recycle()
         dryBitmap = null
         dryCanvas = null
         dryViewport = null
@@ -620,6 +627,7 @@ class FrontBufferedInkView(
     }
 
     private fun markGestureActive() {
+        gestureInProgress = true
         pdfTiles?.gestureActive = true
         removeCallbacks(gestureEndRunnable)
         postDelayed(gestureEndRunnable, GESTURE_SETTLE_MS)
@@ -661,8 +669,10 @@ class FrontBufferedInkView(
 
         if (p != null && i != null) {
             val cached = dryViewport
-            val moved = cached != null && cached != v
-            if (dryDirty || dryBitmap == null || cached == null || (moved && now - lastDryRenderMs >= LIVE_REDRAW_MS)) {
+            // While fingers are pinching or panning the last baked bitmap is only re-projected (GPU matrix draw below);
+            // nothing is re-rasterised until the gesture has settled, then ONE sharp re-bake runs.
+            val holdBake = gestureInProgress && dryBitmap != null && cached != null
+            if (!holdBake && (dryDirty || dryBitmap == null || cached == null)) {
                 renderDry(w, h, p, i, v, now)
             }
             val bmp = dryBitmap
@@ -712,7 +722,6 @@ class FrontBufferedInkView(
     private fun renderDry(w: Int, h: Int, p: NotebookPage, i: SpatialRTreeIndex, v: ViewportTransform, now: Long) {
         var bmp = dryBitmap
         if (bmp == null || bmp.width != w || bmp.height != h) {
-            bmp?.recycle()
             bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             dryBitmap = bmp
             dryCanvas = Canvas(bmp)
@@ -892,11 +901,15 @@ class FrontBufferedInkView(
     // Input
     // =====================================================================================
 
+    /** BACK belongs to the system / Compose back handling: this view never consumes it, even though it holds focus. */
+    override fun onKeyPreIme(keyCode: Int, event: KeyEvent?): Boolean =
+        if (keyCode == KeyEvent.KEYCODE_BACK) false else super.onKeyPreIme(keyCode, event)
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
-        penButtons.onKeyEvent(event) || super.onKeyDown(keyCode, event)
+        if (keyCode == KeyEvent.KEYCODE_BACK) false else penButtons.onKeyEvent(event) || super.onKeyDown(keyCode, event)
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
-        penButtons.onKeyEvent(event) || super.onKeyUp(keyCode, event)
+        if (keyCode == KeyEvent.KEYCODE_BACK) false else penButtons.onKeyEvent(event) || super.onKeyUp(keyCode, event)
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -952,6 +965,14 @@ class FrontBufferedInkView(
         when (cmd) {
             is GestureCommand.Transform -> {
                 markGestureActive()
+                if (zoomLocked && (abs(cmd.scaleFactor - 1f) > 0.015f || abs(cmd.rotationDeltaDeg) > 1f)) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - lastLockedAttemptMs > 600L) {
+                        lastLockedAttemptMs = now
+                        onLockedZoomAttempt?.invoke()
+                    }
+                }
+                // Locked zoom still pans: only scale and rotation are zeroed.
                 val effective = if (zoomLocked) cmd.copy(scaleFactor = 1f, rotationDeltaDeg = 0f) else cmd
                 val moved = viewport.applyGesture(effective, minZoom())
                 // A sheet smaller than the view glides to the centre while the fingers are still down.

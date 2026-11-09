@@ -31,6 +31,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.rounded.UnfoldMore
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -208,6 +212,13 @@ fun InkCanvasHost(
     var zoomMenuOpen by remember { mutableStateOf(false) }
     var zoomPillVisible by remember { mutableStateOf(false) }
     var zoomPrimed by remember { mutableStateOf(false) }
+    var lockPulse by remember { mutableIntStateOf(0) }
+    // A locked zoom must always stay one tap from unlocking: the pill is pinned while locked, and a blocked pinch
+    // pulses it.
+    DisposableEffect(view) {
+        view.onLockedZoomAttempt = { lockPulse++ }
+        onDispose { view.onLockedZoomAttempt = null }
+    }
     LaunchedEffect(viewport.zoom) {
         if (!zoomPrimed) {
             zoomPrimed = true
@@ -235,7 +246,7 @@ fun InkCanvasHost(
             .onSizeChanged { widthPx = it.width }
             .focusRequester(focus)
             .focusable()
-            .onPreviewKeyEvent { vm.penButtons.onKeyEvent(it.nativeKeyEvent) }
+            .onPreviewKeyEvent { it.nativeKeyEvent.keyCode != android.view.KeyEvent.KEYCODE_BACK && vm.penButtons.onKeyEvent(it.nativeKeyEvent) }
     ) {
         AndroidView(
             factory = { view },
@@ -249,7 +260,7 @@ fun InkCanvasHost(
         )
 
         AnimatedVisibility(
-            visible = zoomPillVisible || zoomMenuOpen,
+            visible = zoomPillVisible || zoomMenuOpen || zoomLocked,
             enter = fadeIn(tween(120)),
             exit = fadeOut(tween(260)),
             modifier = Modifier.align(Alignment.TopCenter).padding(safeInsets).padding(top = 10.dp)
@@ -258,12 +269,28 @@ fun InkCanvasHost(
                 zoomPercent = (viewport.zoom * 100f).roundToInt(),
                 starred = pages.getOrNull(current)?.isStarred == true,
                 locked = zoomLocked,
+                pulse = lockPulse,
                 menuOpen = zoomMenuOpen,
                 onMenuOpen = { zoomMenuOpen = it },
                 onStar = vm::toggleStarCurrentPage,
                 onPickPercent = { pct -> if (pct == null) vm.fitToWidth() else vm.setZoomPercent(pct) },
                 onLock = vm::toggleZoomLock,
                 onReset = vm::resetView
+            )
+        }
+
+        if (pages.size > 1) {
+            // Fast page slider on the right edge: drag the handle to scrub, release to land. The same ink view stays
+            // alive throughout; only the page it shows changes.
+            FastScrollThumb(
+                pageCount = pages.size,
+                current = current,
+                onJump = vm::jumpToPage,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(safeInsets)
+                    .padding(top = 64.dp, bottom = 64.dp, end = 2.dp)
+                    .fillMaxHeight()
             )
         }
 
@@ -312,11 +339,109 @@ fun InkCanvasHost(
     }
 }
 
+/**
+ * Google-PDF-Viewer style fast scroller: a slim track on the right edge with a draggable pill handle (⇅ grip). While
+ * dragging, a bubble beside the handle reads "Page 18 / 240"; the page is committed as the handle moves (debounced, so
+ * a fast scrub does not open every page in between) and exactly on release. Only the handle takes touches, so the
+ * canvas next to it stays fully usable.
+ */
+@Composable
+private fun FastScrollThumb(
+    pageCount: Int,
+    current: Int,
+    onJump: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val thumbH = 52.dp
+    val thumbW = 30.dp
+    val thumbHPx = with(density) { thumbH.toPx() }
+    var trackPx by remember { mutableIntStateOf(0) }
+    var dragging by remember { mutableStateOf(false) }
+    var dragFrac by remember { mutableFloatStateOf(0f) }
+    val currentNow by rememberUpdatedState(current)
+    val countNow by rememberUpdatedState(pageCount)
+    val jump by rememberUpdatedState(onJump)
+
+    val restFrac = if (pageCount > 1) current / (pageCount - 1f) else 0f
+    val frac = if (dragging) dragFrac else restFrac
+    val range = (trackPx - thumbHPx).coerceAtLeast(1f)
+    val rangeNow by rememberUpdatedState(range)
+    val scrubIndex = (frac * (pageCount - 1)).roundToInt().coerceIn(0, pageCount - 1)
+
+    // Debounced live commit while scrubbing.
+    LaunchedEffect(dragging, scrubIndex) {
+        if (!dragging) return@LaunchedEffect
+        delay(140)
+        if (scrubIndex != currentNow) jump(scrubIndex)
+    }
+
+    Box(modifier.width(thumbW + 8.dp).onSizeChanged { trackPx = it.height }) {
+        // Track
+        Box(
+            Modifier
+                .align(Alignment.TopEnd)
+                .padding(end = 14.dp)
+                .width(3.dp)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(2.dp))
+                .background(if (dragging) Color(0x663B82F6) else Color(0x33FFFFFF))
+        )
+        val y = (frac * range).roundToInt()
+        // Callout bubble
+        if (dragging) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset { IntOffset(-with(density) { (thumbW + 8.dp).roundToPx() }, y + (thumbHPx / 2f - with(density) { 15.dp.toPx() }).roundToInt()) }
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xF011192B))
+                    .border(BorderStroke(1.dp, Warm.Accent), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text("Page ${scrubIndex + 1} / $pageCount", color = Warm.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        // Handle
+        Box(
+            Modifier
+                .align(Alignment.TopEnd)
+                .offset { IntOffset(0, y) }
+                .size(width = thumbW, height = thumbH)
+                .clip(RoundedCornerShape(topStart = 15.dp, bottomStart = 15.dp, topEnd = 6.dp, bottomEnd = 6.dp))
+                .background(if (dragging) Warm.Accent else Color(0xE6182742))
+                .border(BorderStroke(1.dp, Warm.GlassEdge), RoundedCornerShape(topStart = 15.dp, bottomStart = 15.dp, topEnd = 6.dp, bottomEnd = 6.dp))
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures(
+                        onDragStart = {
+                            dragFrac = if (countNow > 1) currentNow / (countNow - 1f) else 0f
+                            dragging = true
+                        },
+                        onDragEnd = {
+                            val target = (dragFrac * (countNow - 1)).roundToInt().coerceIn(0, countNow - 1)
+                            dragging = false
+                            if (target != currentNow) jump(target)
+                        },
+                        onDragCancel = { dragging = false },
+                        onVerticalDrag = { change, dy ->
+                            change.consume()
+                            dragFrac = (dragFrac + dy / rangeNow).coerceIn(0f, 1f)
+                        }
+                    )
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Rounded.UnfoldMore, "Drag to scrub pages", tint = if (dragging) Color.White else Warm.Text, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
 @Composable
 private fun ZoomPill(
     zoomPercent: Int,
     starred: Boolean,
     locked: Boolean,
+    pulse: Int,
     menuOpen: Boolean,
     onMenuOpen: (Boolean) -> Unit,
     onStar: () -> Unit,
@@ -325,11 +450,19 @@ private fun ZoomPill(
     onReset: () -> Unit
 ) {
     val shape = RoundedCornerShape(50)
+    val bump = remember { Animatable(1f) }
+    LaunchedEffect(pulse) {
+        if (pulse > 0) {
+            bump.animateTo(1.09f, tween(90))
+            bump.animateTo(1f, tween(180))
+        }
+    }
     Row(
         Modifier
+            .graphicsLayer { scaleX = bump.value; scaleY = bump.value }
             .clip(shape)
             .background(Color(0xEB0B1220))
-            .border(BorderStroke(1.dp, Warm.GlassEdge), shape)
+            .border(BorderStroke(if (locked) 1.5.dp else 1.dp, if (locked) Warm.Warn else Warm.GlassEdge), shape)
             .padding(horizontal = 6.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -365,11 +498,11 @@ private fun ZoomPill(
             Icon(
                 if (locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
                 null,
-                tint = if (locked) Warm.AccentBlue else Warm.TextMuted
+                tint = if (locked) Warm.Warn else Warm.TextMuted
             )
             Text(
-                "Lock Zoom",
-                color = if (locked) Warm.AccentBlue else Warm.Text,
+                if (locked) "Locked (Tap to Unlock)" else "Lock Zoom",
+                color = if (locked) Warm.Warn else Warm.Text,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium
             )

@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -42,8 +43,31 @@ class MainActivity : ComponentActivity() {
     /** Set when the Activity is launched from an external PDF/.omninote; the UI switches to the library to show progress. */
     private var showLibraryRequest by mutableStateOf(0)
 
+    /** True while a notebook workspace is on screen; the Activity must never finish in that state. */
+    @Volatile private var isInWorkspace = false
+
+    /** Returns the UI to the library. Set by the root composable while a workspace is open. */
+    @Volatile private var handleWorkspaceBack: (() -> Boolean)? = null
+
+    /**
+     * Registered BEFORE setContent so every Compose BackHandler (modals, selection, split panes) sits above it in the
+     * dispatcher and gets the gesture first. It only fires when none of them wanted it, and inside a workspace it
+     * returns to the library instead of letting the Activity finish.
+     */
+    private val workspaceBackCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            if (handleWorkspaceBack?.invoke() != true) {
+                // Not handled (should not happen): fall back to default behaviour without a loop.
+                isEnabled = false
+                onBackPressedDispatcher.onBackPressed()
+                isEnabled = isInWorkspace
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, workspaceBackCallback)
         enableEdgeToEdge()
         requestHighestRefreshRate()
         setContent { OmniNoteRoot() }
@@ -72,6 +96,12 @@ class MainActivity : ComponentActivity() {
     // ---- hardware pen buttons -------------------------------------------------------------------------------------
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // BACK is never a pen key. Inside a workspace, run it through the back dispatcher exactly once (on key-up) so
+        // the focused ink view can neither swallow it nor let the Activity finish.
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && isInWorkspace) {
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) onBackPressedDispatcher.onBackPressed()
+            return true
+        }
         if (graph.penKeyRouter.onKeyEvent(event)) return true
         return super.dispatchKeyEvent(event)
     }
@@ -144,6 +174,19 @@ class MainActivity : ComponentActivity() {
         DisposableEffect(request) {
             if (request > 0) route = Route.Library
             onDispose { }
+        }
+
+        // Tell the Activity whether a workspace is open so BACK can never finish the app from inside a notebook.
+        val inWorkspace = route is Route.Workspace
+        DisposableEffect(inWorkspace) {
+            isInWorkspace = inWorkspace
+            workspaceBackCallback.isEnabled = inWorkspace
+            handleWorkspaceBack = if (inWorkspace) ({ route = Route.Library; true }) else null
+            onDispose {
+                isInWorkspace = false
+                workspaceBackCallback.isEnabled = false
+                handleWorkspaceBack = null
+            }
         }
 
         // Pen keys go to the app-level manager whenever no canvas is on screen (library, settings, learn mode).

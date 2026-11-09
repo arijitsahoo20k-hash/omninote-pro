@@ -199,23 +199,30 @@ class HandwritingOcrEngine(
             if (_state.value !is OcrModelState.Ready) return OcrOutcome.ModelMissing
         }
         val m = model ?: return OcrOutcome.ModelMissing
-        val rec = recognizer ?: DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(m).build())
-            .also { recognizer = it }
-
-        var bounds: StrokeBounds? = null
-        for (s in strokes) bounds = if (bounds == null) s.bounds else union(bounds, s.bounds)
-        val context = RecognitionContext.builder().apply {
-            if (!preContext.isNullOrEmpty()) setPreContext(preContext)
-            bounds?.let { setWritingArea(WritingArea(it.width * inkUnitsPerMm, it.height * inkUnitsPerMm)) }
-        }.build()
-
         return try {
+            val rec = recognizer ?: DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(m).build())
+                .also { recognizer = it }
+
+            var bounds: StrokeBounds? = null
+            for (s in strokes) bounds = if (bounds == null) s.bounds else union(bounds, s.bounds)
+            // ML Kit's builder throws "Missing required properties: preContext" unless BOTH fields are set, so they are
+            // always set: an empty pre-context and a writing area of at least 1 x 1 unit.
+            val areaW = ((bounds?.width ?: 0f) * inkUnitsPerMm).coerceAtLeast(1f)
+            val areaH = ((bounds?.height ?: 0f) * inkUnitsPerMm).coerceAtLeast(1f)
+            val context = RecognitionContext.builder()
+                .setPreContext(preContext ?: "")
+                .setWritingArea(WritingArea(areaW, areaH))
+                .build()
+
             val result = rec.recognize(ink, context).awaitResult()
             val candidates = result.candidates.map { it.text }
             val best = candidates.firstOrNull()?.trim().orEmpty()
             if (best.isEmpty()) OcrOutcome.NothingRecognized
             else OcrOutcome.Success(OcrResult(best, candidates, StemTextFormatter.format(best)))
-        } catch (e: Exception) {
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Any ML Kit internal failure becomes a clean failure result; it must never escape to a background scope.
             OcrOutcome.Failed(e.message ?: "Recognition failed")
         }
     }
