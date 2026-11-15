@@ -206,6 +206,21 @@ class FrontBufferedInkView(
         setViewport(constrained(moved, 1f, 0f))
     }
 
+    /**
+     * The zoom slider is being held ([active]) or has just been released. Behaves like a pinch for the renderer: the
+     * baked bitmap is only re-projected and no PDF region job starts while the thumb is held, then the normal settle
+     * (re-bake and sharp region) runs [GESTURE_SETTLE_MS] after release.
+     */
+    fun setExternalZoomInProgress(active: Boolean) {
+        if (active) {
+            gestureInProgress = true
+            pdfTiles?.gestureActive = true
+            removeCallbacks(gestureEndRunnable)
+        } else {
+            markGestureActive()
+        }
+    }
+
     /** Re-applies the scroll limits (after a reset or a fit). */
     fun settleViewport() = setViewport(constrained(viewport, 1f, 0f))
 
@@ -233,14 +248,22 @@ class FrontBufferedInkView(
         set(value) {
             field = value
             dryRenderer.pdf = value
-            value?.onTileReady = {
+            value?.onTileReady = { notebookId, pdfPageIndex ->
+                arrivals.add(notebookId to pdfPageIndex)
                 if (!dryRefreshQueued.getAndSet(true)) post {
                     dryRefreshQueued.set(false)
-                    requestDry()
+                    // One re-bake for the whole burst, and only if something that arrived can be on screen.
+                    var visible = false
+                    while (true) {
+                        val a = arrivals.poll() ?: break
+                        if (!visible && arrivalIsOnScreen(a.first, a.second)) visible = true
+                    }
+                    if (visible) requestDry()
                 }
             }
             requestDry()
         }
+    private val arrivals = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, Int>>()
     private val dryRefreshQueued = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
@@ -378,11 +401,14 @@ class FrontBufferedInkView(
     private var dryBitmap: Bitmap? = null
     private var dryCanvas: Canvas? = null
     private var dryViewport: ViewportTransform? = null
+
+    /** Over-scan margins (px) of the baked bitmap, kept next to [dryViewport], which stays the unshifted viewport. */
+    private var dryMarginX = 0
+    private var dryMarginY = 0
+    private val compensationMatrix = Matrix()
     private var dryDirty = true
     private var lastDryRenderMs = 0L
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val previewMatrix = Matrix()
-    private val inverseMatrix = Matrix()
     private val settleRunnable = Runnable {
         dryDirty = true
         invalidate()
@@ -679,11 +705,12 @@ class FrontBufferedInkView(
             val rendered = dryViewport
             if (bmp != null && rendered != null) {
                 if (rendered == v) {
-                    canvas.drawBitmap(bmp, 0f, 0f, null)
+                    canvas.drawBitmap(bmp, -dryMarginX.toFloat(), -dryMarginY.toFloat(), null)
                 } else {
-                    // Mid-gesture: reuse the last render through the transform that maps its viewport onto the live one,
-                    // then re-render once the gesture settles.
-                    canvas.drawBitmap(bmp, transformBetween(rendered, v), bitmapPaint)
+                    // Mid-gesture: reuse the last render through the transform that maps its viewport onto the live one
+                    // (including the over-scan offset), then re-render once the gesture settles.
+                    compensationMatrix.setValues(DryBakeGeometry.compensation(rendered, v, dryMarginX, dryMarginY))
+                    canvas.drawBitmap(bmp, compensationMatrix, bitmapPaint)
                     removeCallbacks(settleRunnable)
                     postDelayed(settleRunnable, SETTLE_MS)
                 }
@@ -720,40 +747,50 @@ class FrontBufferedInkView(
     }
 
     private fun renderDry(w: Int, h: Int, p: NotebookPage, i: SpatialRTreeIndex, v: ViewportTransform, now: Long) {
-        var bmp = dryBitmap
-        if (bmp == null || bmp.width != w || bmp.height != h) {
-            bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            dryBitmap = bmp
-            dryCanvas = Canvas(bmp)
+        android.os.Trace.beginSection("OmniNote.renderDry")
+        try {
+            val margins = DryBakeGeometry.overscanMargins(w, h)
+            val bw = w + 2 * margins.x
+            val bh = h + 2 * margins.y
+            var bmp = dryBitmap
+            if (bmp == null || bmp.width != bw || bmp.height != bh) {
+                bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+                dryBitmap = bmp
+                dryCanvas = Canvas(bmp)
+            }
+            val c = dryCanvas ?: return
+            bmp.eraseColor(0)
+            c.save()
+            c.translate(margins.x.toFloat(), margins.y.toFloat())
+            applyViewport(c, v)
+            dryCtx.pxPerMm = v.pxPerMm
+            dryCtx.smartInversion = smartInversion
+            dryCtx.isExport = false
+            val visible = visiblePageBounds(v, -margins.x.toFloat(), -margins.y.toFloat(), (w + margins.x).toFloat(), (h + margins.y).toFloat())
+            if (isPaged) {
+                renderSheetStack(c, p, i, visible, v)
+            } else {
+                dryRenderer.background = dryBackground
+                dryRenderer.render(
+                    c,
+                    p,
+                    i,
+                    visible,
+                    dryCtx,
+                    activeAudioPlaybackMs = if (audioPlaybackMs >= 0L) audioPlaybackMs else null,
+                    pxPerMm = v.pxPerMm,
+                    isInfiniteCanvas = true
+                )
+            }
+            c.restore()
+            dryViewport = v
+            dryMarginX = margins.x
+            dryMarginY = margins.y
+            dryDirty = false
+            lastDryRenderMs = now
+        } finally {
+            android.os.Trace.endSection()
         }
-        val c = dryCanvas ?: return
-        bmp.eraseColor(0)
-        c.save()
-        applyViewport(c, v)
-        dryCtx.pxPerMm = v.pxPerMm
-        dryCtx.smartInversion = smartInversion
-        dryCtx.isExport = false
-        val visible = visiblePageBounds(v, w.toFloat(), h.toFloat())
-        if (isPaged) {
-            renderSheetStack(c, p, i, visible, v)
-        } else {
-            dryRenderer.background = dryBackground
-            dryRenderer.render(
-                c,
-                p,
-                i,
-                visible,
-                dryCtx,
-                activeAudioPlaybackMs = if (audioPlaybackMs >= 0L) audioPlaybackMs else null,
-                pxPerMm = v.pxPerMm,
-                zoom = v.zoom,
-                isInfiniteCanvas = true
-            )
-        }
-        c.restore()
-        dryViewport = v
-        dryDirty = false
-        lastDryRenderMs = now
     }
 
     /**
@@ -774,7 +811,6 @@ class FrontBufferedInkView(
             c, p, i, visible, dryCtx,
             activeAudioPlaybackMs = replay,
             pxPerMm = v.pxPerMm,
-            zoom = v.zoom,
             isInfiniteCanvas = false
         )
         if (sheetCount > 1) dryRenderer.drawSheetBadge(c, p, "$sheetNumber/$sheetCount", v.pxPerMm)
@@ -796,7 +832,6 @@ class FrontBufferedInkView(
             c, sheet, null, local, dryCtx,
             activeAudioPlaybackMs = null,
             pxPerMm = v.pxPerMm,
-            zoom = v.zoom,
             isInfiniteCanvas = false
         )
         dryRenderer.drawSheetBadge(c, sheet, "$number/$sheetCount", v.pxPerMm)
@@ -843,6 +878,7 @@ class FrontBufferedInkView(
         if (!layer.isVisible || layer.opacity < 1f) return false
         if (p.layers.any { it.isVisible && it.zIndex > layer.zIndex }) return false
         c.save()
+        c.translate(dryMarginX.toFloat(), dryMarginY.toFloat())
         applyViewport(c, v)
         dryCtx.pxPerMm = v.pxPerMm
         dryCtx.paperIsDark = p.template.paperColor.isDark
@@ -854,35 +890,46 @@ class FrontBufferedInkView(
         return true
     }
 
-    /** Matrix taking pixels rendered under [from] to where they belong under [to] (page space is the common frame). */
-    private fun transformBetween(from: ViewportTransform, to: ViewportTransform): Matrix {
-        viewportMatrix(to, previewMatrix)
-        viewportMatrix(from, inverseMatrix)
-        val inv = Matrix()
-        if (!inverseMatrix.invert(inv)) {
-            previewMatrix.reset()
-            return previewMatrix
-        }
-        previewMatrix.preConcat(inv)
-        return previewMatrix
-    }
-
-    private fun viewportMatrix(v: ViewportTransform, out: Matrix) {
-        out.reset()
-        out.postScale(v.pxPerMm, v.pxPerMm)
-        out.postRotate(v.rotationDeg)
-        out.postTranslate(v.translationX, v.translationY)
-    }
-
     private fun applyViewport(canvas: Canvas, v: ViewportTransform) {
         canvas.translate(v.translationX, v.translationY)
         canvas.rotate(v.rotationDeg)
         canvas.scale(v.pxPerMm, v.pxPerMm)
     }
 
-    private fun visiblePageBounds(v: ViewportTransform, w: Float, h: Float): StrokeBounds {
-        val xs = floatArrayOf(0f, w, w, 0f)
-        val ys = floatArrayOf(0f, 0f, h, h)
+    /**
+     * Whether pixels that just arrived for PDF page [pdfPageIndex] of [notebookId] can change what the dry layer shows.
+     * Paged mode places the three sheets exactly as [renderSheetStack] does: the current one at the origin, the
+     * previous one centred above it and the next one centred below it, [SHEET_GAP_MM] apart. An arrival that is not
+     * one of those sheets, or any arrival on the infinite canvas, is treated as visible (safe default).
+     */
+    private fun arrivalIsOnScreen(notebookId: String, pdfPageIndex: Int): Boolean {
+        val p = page ?: return true
+        if (!isPaged || pdfPageIndex == PdfTileManager.ANY_PAGE) return true
+        val margins = DryBakeGeometry.overscanMargins(width, height)
+        val visible = visiblePageBounds(
+            viewport, -margins.x.toFloat(), -margins.y.toFloat(), (width + margins.x).toFloat(), (height + margins.y).toFloat()
+        )
+        var matched = false
+        fun sheetShows(sheet: NotebookPage, ox: Float, oy: Float): Boolean {
+            if (sheet.notebookId != notebookId || sheet.pdfPageIndex != pdfPageIndex) return false
+            matched = true
+            return visible.right >= ox && visible.left <= ox + sheet.widthMm &&
+                visible.bottom >= oy && visible.top <= oy + sheet.heightMm
+        }
+        var shows = sheetShows(p, 0f, 0f)
+        previousSheet?.let { prev ->
+            if (sheetShows(prev, (p.widthMm - prev.widthMm) / 2f, -(prev.heightMm + SHEET_GAP_MM))) shows = true
+        }
+        nextSheet?.let { next ->
+            if (sheetShows(next, (p.widthMm - next.widthMm) / 2f, p.heightMm + SHEET_GAP_MM)) shows = true
+        }
+        return shows || !matched
+    }
+
+    /** Page-space bounds of the screen rectangle [x0, y0]..[x1, y1] (screen pixels), padded by 2 mm. */
+    private fun visiblePageBounds(v: ViewportTransform, x0: Float, y0: Float, x1: Float, y1: Float): StrokeBounds {
+        val xs = floatArrayOf(x0, x1, x1, x0)
+        val ys = floatArrayOf(y0, y0, y1, y1)
         var minX = Float.MAX_VALUE
         var minY = Float.MAX_VALUE
         var maxX = -Float.MAX_VALUE

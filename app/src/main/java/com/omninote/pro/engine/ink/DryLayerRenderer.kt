@@ -61,7 +61,8 @@ class DryLayerRenderer(
      * stamped after it draw as 22% ghosts, items stamped within the last [AUDIO_GLOW_MS] get an accent halo, and
      * earlier items draw normally. Items without a stamp (-1) always draw normally.
      * @param pxPerMm current zoom, used by the template renderer for hairline and density control (0 = ignore).
-     * @param zoom viewport zoom; the PDF tile tier switches on above 1.25 (base scale is pxPerMm / zoom).
+     * The PDF's sharp region tier is chosen from [pxPerMm] alone: it is requested whenever the page's full-page bitmap
+     * is coarser than the on-screen scale, at any zoom.
      */
     fun render(
         canvas: Canvas,
@@ -72,7 +73,6 @@ class DryLayerRenderer(
         excludeIds: Set<String> = emptySet(),
         activeAudioPlaybackMs: Long? = null,
         pxPerMm: Float = 0f,
-        zoom: Float = 1f,
         isInfiniteCanvas: Boolean = false
     ) {
         ctx.paperIsDark = page.template.paperColor.isDark
@@ -83,7 +83,7 @@ class DryLayerRenderer(
             canvas.clipRect(0f, 0f, page.widthMm, page.heightMm)
         }
         try {
-            renderContent(canvas, page, index, viewportMm, ctx, excludeIds, pxPerMm, zoom, isInfiniteCanvas)
+            renderContent(canvas, page, index, viewportMm, ctx, excludeIds, pxPerMm, isInfiniteCanvas)
         } finally {
             if (!isInfiniteCanvas) canvas.restore()
         }
@@ -97,11 +97,10 @@ class DryLayerRenderer(
         ctx: InkRenderContext,
         excludeIds: Set<String>,
         pxPerMm: Float,
-        zoom: Float,
         isInfiniteCanvas: Boolean
     ) {
         paintPaper(canvas, page, viewportMm, pxPerMm, isInfiniteCanvas)
-        if (page.pdfPageIndex != null) pdf?.draw(canvas, page, viewportMm, pxPerMm, zoom)
+        if (page.pdfPageIndex != null) pdf?.draw(canvas, page, viewportMm, pxPerMm)
         background?.draw(canvas, page, viewportMm, ctx)
 
         val layers = page.visibleLayers

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.VerticalSplit
+import androidx.compose.material.icons.rounded.ViewSidebar
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -87,6 +88,9 @@ fun WorkspaceTopBar(
     onToggleRead: () -> Unit,
     onToggleHoldToSnap: () -> Unit,
     onOpenLayers: () -> Unit,
+    showPagesToggle: Boolean,
+    pagesPanelOpen: Boolean,
+    onTogglePagesPanel: () -> Unit,
     onDuplicatePage: () -> Unit,
     onDeletePage: () -> Unit,
     onExport: () -> Unit,
@@ -146,6 +150,11 @@ fun WorkspaceTopBar(
                 Text("A", color = if (holdToSnap) Warm.Accent else Warm.Text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             }
             BarIcon(onOpenLayers) { Icon(Icons.Rounded.Layers, "Layers", tint = Warm.Text) }
+            if (showPagesToggle) {
+                BarIcon(onTogglePagesPanel, selected = pagesPanelOpen) {
+                    Icon(Icons.Rounded.ViewSidebar, "Pages panel", tint = if (pagesPanelOpen) Warm.Accent else Warm.Text)
+                }
+            }
             BarIcon(onTemplateSettings) { Icon(Icons.Rounded.GridOn, "Page template", tint = Warm.Text) }
             BarIcon(onToggleSplit, selected = splitActive) { Icon(Icons.Rounded.VerticalSplit, "Split screen", tint = Warm.Text) }
 

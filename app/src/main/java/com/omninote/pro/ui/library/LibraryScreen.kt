@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -37,6 +38,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -96,6 +98,8 @@ import com.omninote.pro.ui.workspace.ToolButton
 import com.omninote.pro.ui.workspace.Warm
 import com.omninote.pro.ui.workspace.WorkspaceTheme
 import com.omninote.pro.ui.workspace.glass
+import java.time.ZoneId
+import java.util.Locale
 
 private val LibraryBackground = Color(0xFF11192B)
 
@@ -135,6 +139,7 @@ fun LibraryScreen(
 
         var sidebarOpen by rememberSaveable { mutableStateOf(true) }
         var kind by rememberSaveable { mutableStateOf(LibraryKind.ALL) }
+        var sort by rememberSaveable { mutableStateOf(LibrarySort.RECENT) }
         var dialog by remember { mutableStateOf<Dlg?>(null) }
         val snackbar = remember { SnackbarHostState() }
 
@@ -166,7 +171,7 @@ fun LibraryScreen(
             }
 
             val sidebar: @Composable (Boolean) -> Unit = { inDrawer ->
-              Box(Modifier.fillMaxHeight().background(Color(0xFF11192B))) {
+              Box(Modifier.fillMaxHeight().background(Warm.Sidebar)) {
                 NightMountains(Modifier.matchParentSize())
                 Sidebar(
                     open = inDrawer || sidebarOpen,
@@ -188,17 +193,18 @@ fun LibraryScreen(
             }
 
             val mainColumn: @Composable (Modifier) -> Unit = { m ->
-                Column(m.fillMaxHeight().padding(horizontal = if (compact) 12.dp else 18.dp, vertical = 14.dp)) {
+                Column(m.fillMaxHeight().padding(horizontal = if (compact) 12.dp else 20.dp, vertical = 16.dp)) {
                     TopRow(
                         query = query,
                         onQuery = vm::setQuery,
+                        compact = compact,
                         onNew = { dialog = Dlg.NewNotebook },
                         onImportPdf = { pdfPicker.launch(arrayOf("application/pdf")) },
                         onImportArchive = { archivePicker.launch(arrayOf("*/*")) },
                         onSettings = onOpenSettings,
                         onMenu = if (compact) ({ scope.launch { drawerState.open() } }) else null
                     )
-                    Box(Modifier.height(12.dp))
+                    Box(Modifier.height(16.dp))
                     val results = search
                     if (results != null) {
                         SearchResults(
@@ -209,19 +215,28 @@ fun LibraryScreen(
                             onStar = vm::toggleStar
                         )
                     } else {
-                        SectionHeader(section, folders, activeTags, vm::clearTags)
-                        Box(Modifier.height(8.dp))
-                        KindTabs(kind) { kind = it }
-                        Box(Modifier.height(10.dp))
+                        val noteCount = cards.count { !it.isPdf }
+                        val pdfCount = cards.size - noteCount
+                        SectionHeader(section, folders, activeTags, vm::clearTags, noteCount, pdfCount, sort) { sort = it }
+                        Box(Modifier.height(12.dp))
+                        KindSegments(kind, cards.size, noteCount, pdfCount) { kind = it }
+                        Box(Modifier.height(16.dp))
                         val shownCards = when (kind) {
                             LibraryKind.ALL -> cards
                             LibraryKind.NOTE -> cards.filter { !it.isPdf }
                             LibraryKind.PDF -> cards.filter { it.isPdf }
                         }
-                        if (cards.isEmpty()) {
-                            EmptyState(section, activeTags.isNotEmpty(), total == 0) { dialog = Dlg.NewNotebook }
+                        val ordered = remember(shownCards, sort) {
+                            sortItems(shownCards, sort, { it.entity.title }, { it.entity.pageCount }, { it.entity.createdAt }, { it.entity.updatedAt })
+                        }
+                        // Recency headers only make sense when the order is by recency.
+                        val groups = if (sort == LibrarySort.RECENT) {
+                            groupByRecency(ordered, System.currentTimeMillis(), ZoneId.systemDefault(), Locale.getDefault()) { it.entity.updatedAt }
+                        } else null
+                        if (ordered.isEmpty()) {
+                            EmptyState(section, activeTags.isNotEmpty(), total == 0, kind, cards.isNotEmpty())
                         } else {
-                            NotebookGrid(shownCards, folderNames, onOpenNotebook, { dialog = it }, vm::toggleStar, onCreate = { dialog = Dlg.NewNotebook })
+                            NotebookGrid(ordered, groups, folderNames, onOpenNotebook, { dialog = it }, vm::toggleStar)
                         }
                     }
                 }
@@ -241,22 +256,6 @@ fun LibraryScreen(
                     sidebar(false)
                     mainColumn(Modifier.weight(1f))
                 }
-            }
-
-            // Always reachable, whatever the width: the new-notebook button.
-            Row(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(20.dp)
-                    .glass(RoundedCornerShape(50), raised = true, elevation = 14.dp)
-                    .background(Warm.Accent, RoundedCornerShape(50))
-                    .clickable { dialog = Dlg.NewNotebook }
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(Icons.Rounded.Add, "New notebook", tint = Color(0xFFFFFFFF))
-                Text("New Notebook", color = Color(0xFFFFFFFF), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
 
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(16.dp)) { data ->
@@ -349,21 +348,25 @@ private fun Sidebar(
             .fillMaxHeight()
             .width(if (open) 280.dp else 76.dp)
             .animateContentSize()
-            .padding(10.dp)
+            .padding(12.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            if (open) Text("OmniNote Pro", color = Warm.Text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).padding(start = 6.dp))
+            if (open) {
+                NibMark(Modifier.padding(start = 8.dp))
+                Text("OmniNote Pro", color = Warm.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).padding(start = 8.dp))
+            }
             ToolButton(selected = false, onClick = onToggle, size = 44.dp) {
                 Icon(if (open) Icons.Rounded.MenuOpen else Icons.Rounded.Menu, "Toggle sidebar", tint = Warm.Text)
             }
         }
+        if (open) SectionLabel("Library", Modifier.padding(start = 4.dp))
         NavItem(Icons.Rounded.LibraryBooks, "All notebooks", open, section == LibrarySection.All, if (open) total.toString() else null) { onSection(LibrarySection.All) }
         NavItem(Icons.Rounded.Star, "Starred", open, section == LibrarySection.Starred, null) { onSection(LibrarySection.Starred) }
 
         Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (open) SectionLabel("Folders", Modifier.weight(1f))
+            if (open) SectionLabel("Folders", Modifier.weight(1f).padding(start = 4.dp))
             ToolButton(selected = false, onClick = { onNewFolder(null) }, size = 40.dp) {
                 Icon(Icons.Rounded.CreateNewFolder, "New folder", tint = Warm.Text)
             }
@@ -376,8 +379,9 @@ private fun Sidebar(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
+                        .clip(RoundedCornerShape(12.dp))
                         .background(if (isSelected) Warm.AccentSoft else Color.Transparent)
+                        .selectedBar(isSelected)
                         .combinedClickable(onClick = { onSection(LibrarySection.Folder(f.folderId)) }, onLongClick = { menu = true })
                         .padding(start = (4 + depth * 14).dp, end = 2.dp)
                         .height(44.dp),
@@ -412,7 +416,7 @@ private fun Sidebar(
             if (folders.isEmpty()) Text("No folders yet.", color = Warm.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp))
 
             Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                SectionLabel("Tags", Modifier.weight(1f))
+                SectionLabel("Tags", Modifier.weight(1f).padding(start = 4.dp))
                 if (activeTags.isNotEmpty()) ChipButton("Clear", false, onClearTags)
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -428,8 +432,9 @@ private fun NavItem(icon: ImageVector, label: String, open: Boolean, selected: B
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(if (selected) Warm.AccentSoft else Color.Transparent)
+            .selectedBar(selected)
             .clickable(onClick = onClick)
             .padding(horizontal = if (open) 12.dp else 0.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -437,7 +442,7 @@ private fun NavItem(icon: ImageVector, label: String, open: Boolean, selected: B
     ) {
         Icon(icon, label, tint = if (selected) Warm.Accent else Warm.TextMuted, modifier = Modifier.size(24.dp))
         if (open) {
-            Text(label, color = Warm.Text, fontSize = 15.sp, modifier = Modifier.weight(1f).padding(start = 12.dp))
+            Text(label, color = Warm.Text, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(start = 12.dp))
             if (badge != null) Text(badge, color = Warm.TextMuted, fontSize = 12.sp)
         }
     }
@@ -451,6 +456,7 @@ private fun NavItem(icon: ImageVector, label: String, open: Boolean, selected: B
 private fun TopRow(
     query: String,
     onQuery: (String) -> Unit,
+    compact: Boolean,
     onNew: () -> Unit,
     onImportPdf: () -> Unit,
     onImportArchive: () -> Unit,
@@ -464,8 +470,9 @@ private fun TopRow(
         Row(
             Modifier
                 .weight(1f)
+                .heightIn(min = 44.dp)
                 .glass(RoundedCornerShape(50), elevation = 0.dp)
-                .padding(horizontal = 14.dp, vertical = 2.dp),
+                .padding(horizontal = 16.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(Icons.Rounded.Search, "Search", tint = Warm.TextMuted)
@@ -473,65 +480,170 @@ private fun TopRow(
                 com.omninote.pro.ui.workspace.PanelTextField(query, "Search titles, tags and handwriting", Modifier, onQuery)
             }
         }
-        if (onMenu == null) ChipButton("New notebook", true, onNew)
-        ToolButton(selected = false, onClick = onImportPdf, size = 44.dp) { Icon(Icons.Rounded.PictureAsPdf, "Import PDF textbook", tint = Warm.Text) }
-        ToolButton(selected = false, onClick = onImportArchive, size = 44.dp) { Icon(Icons.Rounded.Unarchive, "Import .omninote archive", tint = Warm.Text) }
+        NewNotebookButton(compact, onNew)
+        ImportMenuButton(compact, onImportPdf, onImportArchive)
         ToolButton(selected = false, onClick = onSettings, size = 44.dp) { Icon(Icons.Rounded.Settings, "Settings", tint = Warm.Text) }
     }
 }
 
+/** The one create control in the library: a filled accent button, icon-only below 720 dp. */
 @Composable
-private fun SectionHeader(section: LibrarySection, folders: List<FolderEntity>, activeTags: Set<String>, onClearTags: () -> Unit) {
+private fun NewNotebookButton(compact: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    if (compact) {
+        Box(
+            Modifier.size(44.dp).clip(shape).background(Warm.Accent, shape).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Rounded.Add, "New notebook", tint = Color.White)
+        }
+    } else {
+        Row(
+            Modifier.height(44.dp).clip(shape).background(Warm.Accent, shape).clickable(onClick = onClick).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(Icons.Rounded.Add, null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Text("New notebook", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+/** One Import button with a drop-down for the two sources. */
+@Composable
+private fun ImportMenuButton(compact: Boolean, onImportPdf: () -> Unit, onImportArchive: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        if (compact) {
+            ToolButton(selected = false, onClick = { open = true }, size = 44.dp) { Icon(Icons.Rounded.Unarchive, "Import", tint = Warm.Text) }
+        } else {
+            val shape = RoundedCornerShape(12.dp)
+            Row(
+                Modifier.height(44.dp).clip(shape).background(Color(0x1FCBD5E1), shape).clickable { open = true }.padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(Icons.Rounded.Unarchive, null, tint = Warm.Text, modifier = Modifier.size(20.dp))
+                Text("Import", color = Warm.Text, fontSize = 14.sp)
+                Icon(Icons.Rounded.ExpandMore, null, tint = Warm.TextMuted, modifier = Modifier.size(20.dp))
+            }
+        }
+        DropdownMenu(open, { open = false }) {
+            DropdownMenuItem({ Text("PDF textbook") }, { open = false; onImportPdf() })
+            DropdownMenuItem({ Text(".omninote archive") }, { open = false; onImportArchive() })
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(
+    section: LibrarySection,
+    folders: List<FolderEntity>,
+    activeTags: Set<String>,
+    onClearTags: () -> Unit,
+    noteCount: Int,
+    pdfCount: Int,
+    sort: LibrarySort,
+    onSort: (LibrarySort) -> Unit
+) {
     val title = when (section) {
         LibrarySection.All -> "All notebooks"
         LibrarySection.Starred -> "Starred"
         is LibrarySection.Folder -> folders.firstOrNull { it.folderId == section.folderId }?.name ?: "Folder"
     }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-        Text(title, color = Warm.Text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-        for (t in activeTags) ChipButton("$t  ✕", true, onClearTags)
+    val subtitle = (if (noteCount == 1) "1 notebook" else "$noteCount notebooks") + " · " + (if (pdfCount == 1) "1 PDF" else "$pdfCount PDFs")
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
+                Text(title, color = Warm.Text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                for (t in activeTags) ChipButton("$t  ✕", true, onClearTags)
+            }
+            Text(subtitle, color = Warm.TextMuted, fontSize = 13.sp)
+        }
+        SortMenu(sort, onSort)
     }
 }
 
 @Composable
-private fun EmptyState(section: LibrarySection, filtered: Boolean, noNotebooksAtAll: Boolean, onNew: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+private fun SortMenu(sort: LibrarySort, onSort: (LibrarySort) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp)).clickable { open = true }.padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("Sort: ${sort.label}", color = Warm.TextMuted, fontSize = 13.sp)
+            Icon(Icons.Rounded.ExpandMore, "Change sort order", tint = Warm.TextMuted, modifier = Modifier.size(20.dp))
+        }
+        DropdownMenu(open, { open = false }) {
+            for (o in LibrarySort.values()) {
+                DropdownMenuItem(
+                    { Text(o.label, color = if (o == sort) Warm.Accent else Warm.Text) },
+                    { open = false; onSort(o) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyState(section: LibrarySection, filtered: Boolean, noNotebooksAtAll: Boolean, kind: LibraryKind, anyInSection: Boolean) {
+    Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val kindOnly = anyInSection && kind != LibraryKind.ALL
         Text(
             when {
                 noNotebooksAtAll -> "Your library is empty"
+                kindOnly && kind == LibraryKind.PDF -> "No PDFs here"
+                kindOnly -> "No notes here"
                 filtered -> "No notebook has all of those tags"
                 section == LibrarySection.Starred -> "Nothing starred yet"
                 section is LibrarySection.Folder -> "This folder is empty"
                 else -> "No notebooks here"
             },
-            color = Warm.Text, fontSize = 18.sp, fontWeight = FontWeight.Medium
+            color = Warm.Text, fontSize = 16.sp, fontWeight = FontWeight.Medium
         )
         Text(
-            if (noNotebooksAtAll) "Create a notebook, or import a PDF textbook to write on top of it." else "Try another section, or create a notebook here.",
+            when {
+                noNotebooksAtAll -> "Tap New notebook, or import a PDF."
+                kindOnly -> "Switch the filter to All to see everything."
+                else -> "Try another section, or tap New notebook."
+            },
             color = Warm.TextMuted, fontSize = 13.sp
         )
-        ChipButton("New notebook", true, onNew)
     }
 }
 
 @Composable
 private fun NotebookGrid(
     cards: List<NotebookCard>,
+    groups: List<RecencyGroup<NotebookCard>>?,
     folderNames: Map<String, String>,
     onOpen: (String, Int) -> Unit,
     onAction: (Dlg) -> Unit,
-    onStar: (NotebookCard) -> Unit,
-    onCreate: () -> Unit
+    onStar: (NotebookCard) -> Unit
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(168.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        columns = GridCells.Adaptive(176.dp),
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        item(key = "create") { CreateCard(onCreate) }
-        items(cards, key = { it.entity.notebookId }) { card ->
-            NotebookCardView(card, folderNames[card.entity.folderId], { onOpen(card.entity.notebookId, 0) }, onAction, onStar)
+        if (groups != null) {
+            for (g in groups) {
+                item(key = "h-" + g.bucket.name, span = { GridItemSpan(maxLineSpan) }) { SectionLabel(g.bucket.label) }
+                items(g.items, key = { it.entity.notebookId }) { card ->
+                    NotebookCardView(card, folderNames[card.entity.folderId], { onOpen(card.entity.notebookId, 0) }, onAction, onStar)
+                }
+            }
+        } else {
+            items(cards, key = { it.entity.notebookId }) { card ->
+                NotebookCardView(card, folderNames[card.entity.folderId], { onOpen(card.entity.notebookId, 0) }, onAction, onStar)
+            }
         }
     }
 }
@@ -552,8 +664,8 @@ private fun SearchResults(
         return
     }
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(168.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        columns = GridCells.Adaptive(176.dp),
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
         modifier = Modifier.fillMaxSize()
     ) {
@@ -594,7 +706,9 @@ private fun NotebookCardView(
     var menu by remember { mutableStateOf(false) }
     val cover = Color(e.coverColorArgb)
     val accent = Color(e.coverAccentArgb)
+    // Cover precedence: custom artwork, then the PDF's first page, then the solid colour.
     val artwork = rememberCoverBitmap(e.coverImageUri)
+    val pdfPage = rememberPdfCover(e.notebookId, enabled = card.isPdf && e.coverImageUri == null)
     Column(Modifier.fillMaxWidth().clickable(onClick = onOpen), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // Portrait cover: the artwork when there is one, otherwise the solid colour with its spine.
         Box(
@@ -610,6 +724,12 @@ private fun NotebookCardView(
                     artwork, e.title, Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
                 )
+            } else if (pdfPage != null) {
+                androidx.compose.foundation.Image(
+                    pdfPage, e.title, Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    alignment = Alignment.TopCenter
+                )
             } else {
                 Box(Modifier.fillMaxHeight().width(10.dp).background(accent))
                 Text(
@@ -619,7 +739,8 @@ private fun NotebookCardView(
             }
             if (card.isPdf) {
                 Text(
-                    "PDF", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    if (e.pageCount == 1) "PDF · 1 page" else "PDF · ${e.pageCount} pages",
+                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
                         .background(Color(0xCC11192B), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
                 )
@@ -657,11 +778,11 @@ private fun NotebookCardView(
                     append("  ·  ").append(if (e.pageCount == 1) "1 page" else "${e.pageCount} pages")
                     if (folderName != null) append("  ·  ").append(folderName)
                 },
-                color = Warm.TextMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                color = Warm.TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             if (card.tags.isNotEmpty()) {
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (t in card.tags) Text(t, color = Warm.Accent, fontSize = 10.sp)
+                    for (t in card.tags) Text(t, color = Warm.Accent, fontSize = 12.sp)
                 }
             }
         }
@@ -670,50 +791,55 @@ private fun NotebookCardView(
 
 private fun Modifier.shadowCard(): Modifier = this.shadow(8.dp, RoundedCornerShape(14.dp), clip = false)
 
-/** All / Note / PDF filter tabs above the grid. */
-private enum class LibraryKind(val label: String) { ALL("ALL"), NOTE("NOTE"), PDF("PDF") }
+/** All / Notes / PDFs filter. */
+private enum class LibraryKind(val label: String) { ALL("All"), NOTE("Notes"), PDF("PDFs") }
 
 @Composable
-private fun KindTabs(selected: LibraryKind, onSelect: (LibraryKind) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun KindSegments(selected: LibraryKind, all: Int, notes: Int, pdfs: Int, onSelect: (LibraryKind) -> Unit) {
+    val outer = RoundedCornerShape(12.dp)
+    Row(
+        Modifier.clip(outer).background(Color(0x1FCBD5E1), outer).padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         for (k in LibraryKind.values()) {
             val on = k == selected
-            Column(Modifier.clickable { onSelect(k) }.padding(vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(k.label, color = if (on) Warm.Text else Warm.TextMuted, fontSize = 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, letterSpacing = 1.sp)
-                Box(Modifier.padding(top = 4.dp).height(2.dp).width(24.dp).background(if (on) Warm.Accent else Color.Transparent, RoundedCornerShape(1.dp)))
+            val n = when (k) { LibraryKind.ALL -> all; LibraryKind.NOTE -> notes; LibraryKind.PDF -> pdfs }
+            val inner = RoundedCornerShape(8.dp)
+            Box(
+                Modifier.heightIn(min = 36.dp).clip(inner).background(if (on) Warm.Accent else Color.Transparent, inner)
+                    .clickable { onSelect(k) }.padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "${k.label} $n", color = if (on) Color.White else Warm.TextMuted, fontSize = 13.sp,
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1
+                )
             }
         }
     }
 }
 
-/** The dashed "+ Create" tile that leads the grid. */
+/** Left accent bar for the selected sidebar row. Draw it after the background so it sits on the soft fill. */
+private fun Modifier.selectedBar(selected: Boolean): Modifier =
+    if (!selected) this else this.drawBehind { drawRect(Warm.Accent, size = Size(3.dp.toPx(), size.height)) }
+
+/** Small pen-nib mark beside the wordmark. */
 @Composable
-private fun CreateCard(onCreate: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clickable(onClick = onCreate), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(0.75f)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color(0x1A3B82F6))
-                .drawBehind {
-                    drawRoundRect(
-                        color = Color(0xFF3B82F6),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(14.dp.toPx()),
-                        style = androidx.compose.ui.graphics.drawscope.Stroke(
-                            width = 1.6.dp.toPx(),
-                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
-                        )
-                    )
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Icon(Icons.Rounded.Add, "Create", tint = Warm.Accent, modifier = Modifier.size(34.dp))
-                Text("Create", color = Warm.Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            }
+private fun NibMark(modifier: Modifier = Modifier) {
+    Canvas(modifier.size(20.dp)) {
+        val w = size.width
+        val h = size.height
+        val nib = Path().apply {
+            moveTo(w * 0.5f, h * 0.02f)
+            lineTo(w * 0.88f, h * 0.5f)
+            lineTo(w * 0.5f, h * 0.98f)
+            lineTo(w * 0.12f, h * 0.5f)
+            close()
         }
-        Text("New notebook", color = Warm.TextMuted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 2.dp))
+        drawPath(nib, Warm.Accent)
+        drawCircle(Warm.Sidebar, w * 0.09f, Offset(w * 0.5f, h * 0.52f))
+        drawLine(Warm.Sidebar, Offset(w * 0.5f, h * 0.6f), Offset(w * 0.5f, h * 0.92f), strokeWidth = 1.5.dp.toPx())
     }
 }
 
@@ -726,11 +852,11 @@ private fun NightMountains(modifier: Modifier = Modifier) {
         val band = minOf(h, 190.dp.toPx())
         val top = h - band
         // moon
-        drawCircle(Color(0x33DCE6FF), 16.dp.toPx(), Offset(w * 0.76f, top + band * 0.18f))
-        drawCircle(Color(0x66DCE6FF), 9.dp.toPx(), Offset(w * 0.76f, top + band * 0.18f))
+        drawCircle(Color(0x1ADCE6FF), 16.dp.toPx(), Offset(w * 0.76f, top + band * 0.18f))
+        drawCircle(Color(0x33DCE6FF), 9.dp.toPx(), Offset(w * 0.76f, top + band * 0.18f))
         // a few stars
         for ((fx, fy) in listOf(0.14f to 0.12f, 0.34f to 0.06f, 0.52f to 0.2f, 0.9f to 0.34f, 0.24f to 0.3f)) {
-            drawCircle(Color(0x88FFFFFF), 1.3.dp.toPx(), Offset(w * fx, top + band * fy))
+            drawCircle(Color(0x55FFFFFF), 1.3.dp.toPx(), Offset(w * fx, top + band * fy))
         }
         fun ridge(color: Color, pts: List<Pair<Float, Float>>) {
             val path = Path().apply {

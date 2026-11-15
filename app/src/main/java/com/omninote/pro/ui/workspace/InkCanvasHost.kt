@@ -12,22 +12,29 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import com.omninote.pro.engine.input.ViewportTransform
+import com.omninote.pro.engine.input.ZoomScale
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -99,13 +106,16 @@ private data class PageTurn(val id: Int, val dir: Int)
  * creates the view, forwards hardware pen keys, re-points the view when the ViewModel publishes a new page revision,
  * and draws the floating chrome: the "Page 3 of 24" pill, the page filmstrip and the zoom pill.
  *
- * [safeInsets] keeps the floating chrome clear of the top bars and the pen dock.
+ * [safeInsets] keeps the floating chrome clear of the top bars and the pen dock. [pageSidebarOpen] shows the PDF pages
+ * panel over the left edge of the canvas; [onClosePageSidebar] is its close button.
  */
 @Composable
 fun InkCanvasHost(
     vm: WorkspaceViewModel,
     modifier: Modifier = Modifier,
-    safeInsets: PaddingValues = PaddingValues(0.dp)
+    safeInsets: PaddingValues = PaddingValues(0.dp),
+    pageSidebarOpen: Boolean = false,
+    onClosePageSidebar: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current.density
@@ -266,7 +276,8 @@ fun InkCanvasHost(
             modifier = Modifier.align(Alignment.TopCenter).padding(safeInsets).padding(top = 10.dp)
         ) {
             ZoomPill(
-                zoomPercent = (viewport.zoom * 100f).roundToInt(),
+                zoom = viewport.zoom,
+                minPercent = vm.minZoomPercent(),
                 starred = pages.getOrNull(current)?.isStarred == true,
                 locked = zoomLocked,
                 pulse = lockPulse,
@@ -274,8 +285,24 @@ fun InkCanvasHost(
                 onMenuOpen = { zoomMenuOpen = it },
                 onStar = vm::toggleStarCurrentPage,
                 onPickPercent = { pct -> if (pct == null) vm.fitToWidth() else vm.setZoomPercent(pct) },
+                onSliderActive = vm::setZoomSliderActive,
                 onLock = vm::toggleZoomLock,
                 onReset = vm::resetView
+            )
+        }
+
+        AnimatedVisibility(
+            visible = pageSidebarOpen && hasPdfPages(pages),
+            enter = slideInHorizontally { -it } + fadeIn(),
+            exit = slideOutHorizontally { -it } + fadeOut(),
+            modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp, top = 8.dp, bottom = 8.dp)
+        ) {
+            PdfPageSidebar(
+                vm = vm,
+                pages = pages,
+                current = current,
+                compact = widthPx < with(LocalDensity.current) { PagesPanelCompactBelow.toPx() },
+                onClose = onClosePageSidebar
             )
         }
 
@@ -305,6 +332,7 @@ fun InkCanvasHost(
                         exit = slideOutVertically { it / 2 } + fadeOut()
                     ) {
                         PageFilmstrip(
+                            vm = vm,
                             pages = pages,
                             current = current,
                             onJump = vm::jumpToPage,
@@ -438,7 +466,8 @@ private fun FastScrollThumb(
 
 @Composable
 private fun ZoomPill(
-    zoomPercent: Int,
+    zoom: Float,
+    minPercent: Int,
     starred: Boolean,
     locked: Boolean,
     pulse: Int,
@@ -446,9 +475,11 @@ private fun ZoomPill(
     onMenuOpen: (Boolean) -> Unit,
     onStar: () -> Unit,
     onPickPercent: (Int?) -> Unit,
+    onSliderActive: (Boolean) -> Unit,
     onLock: () -> Unit,
     onReset: () -> Unit
 ) {
+    val zoomPercent = (zoom * 100f).roundToInt()
     val shape = RoundedCornerShape(50)
     val bump = remember { Animatable(1f) }
     LaunchedEffect(pulse) {
@@ -483,6 +514,13 @@ private fun ZoomPill(
                 Icon(Icons.Rounded.KeyboardArrowDown, "Zoom presets", tint = Warm.TextMuted)
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { onMenuOpen(false) }) {
+                ZoomSliderRow(
+                    zoom = zoom,
+                    minPercent = minPercent,
+                    locked = locked,
+                    onPercent = { onPickPercent(it) },
+                    onActive = onSliderActive
+                )
                 DropdownMenuItem(text = { Text("Fit width") }, onClick = { onMenuOpen(false); onPickPercent(null) })
                 for (pct in listOf(50, 75, 100, 150, 200, 300, 500)) {
                     DropdownMenuItem(text = { Text("$pct%") }, onClick = { onMenuOpen(false); onPickPercent(pct) })
@@ -516,6 +554,75 @@ private fun ZoomPill(
     }
 }
 
+/**
+ * Continuous zoom control at the top of the zoom menu: a "-" button, a logarithmic slider (the position always comes
+ * from the live zoom, so pinch, presets and Reset move it) and a "+" button, with a numeric readout. Disabled while
+ * the zoom is locked.
+ */
+@Composable
+private fun ZoomSliderRow(
+    zoom: Float,
+    minPercent: Int,
+    locked: Boolean,
+    onPercent: (Int) -> Unit,
+    onActive: (Boolean) -> Unit
+) {
+    val minZoom = minPercent / 100f
+    val maxZoom = ViewportTransform.MAX_ZOOM
+    val maxPercent = (maxZoom * 100f).roundToInt()
+    val percent = (zoom * 100f).roundToInt()
+    fun step(target: Int) {
+        onActive(true)
+        onPercent(target.coerceIn(minPercent, maxPercent))
+        onActive(false)
+    }
+    Column(Modifier.width(300.dp).padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).clickable(enabled = !locked) {
+                    step((percent / 1.1f).roundToInt().coerceAtMost(percent - 1))
+                },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("\u2212", color = if (locked) Warm.TextMuted else Warm.Text, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+            }
+            Slider(
+                value = ZoomScale.fractionForZoom(zoom, minZoom, maxZoom),
+                onValueChange = { f ->
+                    onActive(true)
+                    onPercent((ZoomScale.zoomForFraction(f, minZoom, maxZoom) * 100f).roundToInt().coerceIn(minPercent, maxPercent))
+                },
+                onValueChangeFinished = { onActive(false) },
+                enabled = !locked,
+                colors = SliderDefaults.colors(
+                    thumbColor = Warm.Accent,
+                    activeTrackColor = Warm.Accent,
+                    inactiveTrackColor = Color(0x33CBD5E1),
+                    disabledThumbColor = Warm.TextMuted,
+                    disabledActiveTrackColor = Color(0x55CBD5E1)
+                ),
+                modifier = Modifier.weight(1f).semantics { contentDescription = "Zoom" }
+            )
+            Box(
+                Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).clickable(enabled = !locked) {
+                    step((percent * 1.1f).roundToInt().coerceAtLeast(percent + 1))
+                },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("+", color = if (locked) Warm.TextMuted else Warm.Text, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+            }
+            Text(
+                "$percent%",
+                color = Warm.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(48.dp), textAlign = TextAlign.End
+            )
+        }
+        if (locked) {
+            Text("Zoom is locked", color = Warm.Warn, fontSize = 12.sp, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
+        }
+    }
+}
+
 @Composable
 private fun PillDivider() {
     Box(Modifier.width(1.dp).height(18.dp).background(Warm.Divider))
@@ -524,6 +631,7 @@ private fun PillDivider() {
 /** Horizontal strip of page thumbnails: scaled sheets with their number, starred flag and the current page ringed. */
 @Composable
 private fun PageFilmstrip(
+    vm: WorkspaceViewModel,
     pages: List<com.omninote.pro.data.PageMetaEntity>,
     current: Int,
     onJump: (Int) -> Unit,
@@ -558,19 +666,35 @@ private fun PageFilmstrip(
                     )
                     .clickable { onJump(i) }
             ) {
-                // A few template-style rules so the strip reads as paper, not blank tiles.
-                Canvas(Modifier.fillMaxSize()) {
-                    val gap = size.height / 9f
-                    var y = gap
-                    while (y < size.height - gap / 2f) {
-                        drawLine(Color(0x22457AA6), Offset(size.width * 0.1f, y), Offset(size.width * 0.9f, y), 1f)
-                        y += gap
+                val thumbWidthPx = with(LocalDensity.current) { (thumbHeight.toPx() * ratio / 8f).roundToInt() * 8 }.coerceAtLeast(8)
+                val bitmap by rememberPdfThumbnail(vm, meta, thumbWidthPx)
+                val real = bitmap
+                if (real != null) {
+                    androidx.compose.foundation.Image(
+                        real, "Page ${i + 1}", Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.FillBounds
+                    )
+                } else if (meta.pdfPageIndex == null) {
+                    // Blank page: a few template-style rules so the strip reads as paper, not an empty tile.
+                    Canvas(Modifier.fillMaxSize()) {
+                        val gap = size.height / 9f
+                        var y = gap
+                        while (y < size.height - gap / 2f) {
+                            drawLine(Color(0x22457AA6), Offset(size.width * 0.1f, y), Offset(size.width * 0.9f, y), 1f)
+                            y += gap
+                        }
                     }
                 }
                 Text(
                     "${i + 1}",
                     color = Color(0xFF334155), fontSize = 12.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp)
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 4.dp)
+                        .then(
+                            if (real != null) Modifier.background(Color(0xCCFFFFFF), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp)
+                            else Modifier
+                        )
                 )
                 if (meta.isStarred) {
                     Icon(
@@ -594,98 +718,4 @@ private fun normaliseDeg(d: Float): Int {
     if (v > 180f) v -= 360f
     if (v <= -180f) v += 360f
     return v.roundToInt()
-}
-
-/** Compact "125%  0°" pill. Tap resets to 100% / 0°; long-press fits the page to the width. */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun ZoomRotationPill(
-    zoomPercent: Int,
-    rotationDeg: Int,
-    onReset: () -> Unit,
-    onFit: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val shape = RoundedCornerShape(50)
-    Box(
-        modifier
-            .glass(shape, elevation = 6.dp)
-            .combinedClickable(onClick = onReset, onLongClick = onFit)
-            .padding(horizontal = 14.dp, vertical = 8.dp)
-    ) {
-        Text(
-            "$zoomPercent%  ·  $rotationDeg°",
-            color = Warm.Text,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium
-        )
-    }
-}
-
-/**
- * Vertical strip of page ticks. Drag or tap to scrub; the page changes when you let go, with a bubble showing the
- * target page while dragging.
- */
-@Composable
-fun PageScrubber(
-    count: Int,
-    current: Int,
-    onJump: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var heightPx by remember { mutableFloatStateOf(1f) }
-    var dragIndex by remember { mutableIntStateOf(-1) }
-    val shown = if (dragIndex >= 0) dragIndex else current
-    val stripHeight = 220.dp
-
-    fun indexAt(y: Float): Int = ((y / heightPx) * count).toInt().coerceIn(0, count - 1)
-
-    Box(modifier.height(stripHeight).width(30.dp)) {
-        Canvas(
-            Modifier
-                .fillMaxSize()
-                .glass(RoundedCornerShape(15.dp), elevation = 4.dp)
-                .pointerInput(count) {
-                    detectTapGestures { offset -> onJump(indexAt(offset.y)) }
-                }
-                .pointerInput(count) {
-                    detectVerticalDragGestures(
-                        onDragStart = { dragIndex = indexAt(it.y) },
-                        onDragEnd = {
-                            val target = dragIndex
-                            dragIndex = -1
-                            if (target >= 0) onJump(target)
-                        },
-                        onDragCancel = { dragIndex = -1 },
-                        onVerticalDrag = { change, _ -> dragIndex = indexAt(change.position.y) }
-                    )
-                }
-        ) {
-            heightPx = size.height
-            val ticks = minOf(count, 40)
-            for (i in 0 until ticks) {
-                val pageForTick = if (count <= 40) i else (i * (count - 1f) / (ticks - 1)).roundToInt()
-                val y = (i + 0.5f) / ticks * size.height
-                val active = abs(pageForTick - shown) <= (if (count <= 40) 0 else count / (ticks * 2))
-                drawRoundRect(
-                    color = if (active) Warm.Accent else Warm.TextMuted.copy(alpha = 0.55f),
-                    topLeft = Offset(if (active) 6.dp.toPx() else 10.dp.toPx(), y - 1.dp.toPx()),
-                    size = Size(if (active) size.width - 12.dp.toPx() else size.width - 20.dp.toPx(), 2.dp.toPx()),
-                    cornerRadius = CornerRadius(1.dp.toPx())
-                )
-            }
-        }
-        if (dragIndex >= 0) {
-            val y = ((dragIndex + 0.5f) / count * heightPx).roundToInt()
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .offset { IntOffset(-64.dp.roundToPx(), y - (heightPx / 2f).roundToInt() - 14.dp.roundToPx()) }
-                    .glass(RoundedCornerShape(10.dp), elevation = 4.dp)
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
-            ) {
-                Text("p ${dragIndex + 1}", color = Warm.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            }
-        }
-    }
 }

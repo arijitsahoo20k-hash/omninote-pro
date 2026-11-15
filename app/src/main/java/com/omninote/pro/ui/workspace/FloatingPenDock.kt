@@ -2,6 +2,7 @@ package com.omninote.pro.ui.workspace
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,9 +29,12 @@ import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +80,7 @@ private fun isPenGlyph(t: BrushType) = t != BrushType.HIGHLIGHTER && t != BrushT
  * (ruler, fill bucket, audio pin, layers, dock position). Tapping the tool that is already active opens a compact
  * popover beside the strip. It fills its parent, draws nothing outside itself and lets every other touch through.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FloatingPenDock(
     vm: WorkspaceViewModel,
@@ -113,157 +118,164 @@ fun FloatingPenDock(
 
     fun toggle(p: Popover) { popover = if (popover == p) Popover.NONE else p }
 
-    Box(modifier.fillMaxSize()) {
-        if (prefs.dockCollapsed) {
-            // The collapsed pill never sits top-centre (HyperOS handle): a top dock collapses into the top-right corner.
+    // Press feedback is a flat 10% wash and nothing else; Material ripples (incl. Slider / Switch / Checkbox thumb halos
+    // and stylus-hover layers) are switched off inside the dock only.
+    CompositionLocalProvider(
+        LocalIndication provides CrispPressIndication,
+        LocalRippleConfiguration provides null
+    ) {
+        Box(modifier.fillMaxSize()) {
+            if (prefs.dockCollapsed) {
+                // The collapsed pill never sits top-centre (HyperOS handle): a top dock collapses into the top-right corner.
+                val align = when (edge) {
+                    DockEdge.TOP -> Alignment.TopEnd
+                    DockEdge.BOTTOM -> Alignment.BottomCenter
+                    DockEdge.LEFT -> Alignment.CenterStart
+                    DockEdge.RIGHT -> Alignment.CenterEnd
+                }
+                MiniPill(
+                    modifier = Modifier.align(align).padding(8.dp),
+                    type = activeBrush?.type ?: BrushType.BALLPOINT,
+                    color = activeBrush?.colorArgb ?: BrushConfigDefaultInk,
+                    onExpand = { vm.userPrefs.setDock(edge, false) }
+                )
+                return@Box
+            }
+
             val align = when (edge) {
-                DockEdge.TOP -> Alignment.TopEnd
+                DockEdge.TOP -> Alignment.TopCenter
                 DockEdge.BOTTOM -> Alignment.BottomCenter
                 DockEdge.LEFT -> Alignment.CenterStart
                 DockEdge.RIGHT -> Alignment.CenterEnd
             }
-            MiniPill(
-                modifier = Modifier.align(align).padding(8.dp),
-                type = activeBrush?.type ?: BrushType.BALLPOINT,
-                color = activeBrush?.colorArgb ?: BrushConfigDefaultInk,
-                onExpand = { vm.userPrefs.setDock(edge, false) }
-            )
-            return@Box
-        }
 
-        val align = when (edge) {
-            DockEdge.TOP -> Alignment.TopCenter
-            DockEdge.BOTTOM -> Alignment.BottomCenter
-            DockEdge.LEFT -> Alignment.CenterStart
-            DockEdge.RIGHT -> Alignment.CenterEnd
-        }
-
-        val popoverContent: @Composable () -> Unit = {
-            if (popover != Popover.NONE) {
-                Column(
-                    Modifier
-                        .padding(6.dp)
-                        .width(290.dp)
-                        .glass(RoundedCornerShape(18.dp), raised = true, elevation = 14.dp)
-                        .verticalScroll(rememberScrollState())
-                        .padding(12.dp)
-                ) {
-                    when (popover) {
-                        Popover.PEN -> PenPopover(
-                            vm = vm,
-                            slots = slots,
-                            activeSlot = activeSlot,
-                            group = { isPenGlyph(it) },
-                            onOpenStudio = { onOpenPenStudio(penSlot); popover = Popover.NONE }
-                        )
-                        Popover.HIGHLIGHTER -> PenPopover(
-                            vm = vm,
-                            slots = slots,
-                            activeSlot = activeSlot,
-                            group = { it == BrushType.HIGHLIGHTER },
-                            onOpenStudio = { onOpenPenStudio(highlighterSlot.coerceAtLeast(0)); popover = Popover.NONE }
-                        )
-                        Popover.ERASER -> EraserPopover(vm)
-                        Popover.LASSO -> LassoPopover(vm)
-                        Popover.FILL -> FillPopover(vm)
-                        Popover.TAPE -> TapePopover(vm)
-                        Popover.LASER -> LaserPopover(vm)
-                        Popover.INSTRUMENT -> InstrumentPopover(vm)
-                        Popover.MORE -> MorePopover(
-                            fillSelected = tool == WorkspaceTool.FILL_BUCKET,
-                            rulerActive = instrument != GeometryInstrument.NONE,
-                            onFill = { popover = Popover.FILL; vm.setTool(WorkspaceTool.FILL_BUCKET) },
-                            onRuler = { popover = Popover.INSTRUMENT },
-                            onAudioPin = { popover = Popover.NONE; onOpenAudioPin() },
-                            onLayers = { popover = Popover.NONE; onOpenLayers() },
-                            current = edge,
-                            onPick = { vm.userPrefs.setDock(it, false); popover = Popover.NONE },
-                            onCollapse = { vm.userPrefs.setDock(edge, true); popover = Popover.NONE }
-                        )
-                        Popover.NONE -> Unit
+            val popoverContent: @Composable () -> Unit = {
+                if (popover != Popover.NONE) {
+                    Column(
+                        Modifier
+                            .padding(6.dp)
+                            .width(290.dp)
+                            .solidPanel(RoundedCornerShape(18.dp))
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp)
+                    ) {
+                        when (popover) {
+                            Popover.PEN -> PenPopover(
+                                vm = vm,
+                                slots = slots,
+                                activeSlot = activeSlot,
+                                group = { isPenGlyph(it) },
+                                onOpenStudio = { onOpenPenStudio(penSlot); popover = Popover.NONE }
+                            )
+                            Popover.HIGHLIGHTER -> PenPopover(
+                                vm = vm,
+                                slots = slots,
+                                activeSlot = activeSlot,
+                                group = { it == BrushType.HIGHLIGHTER },
+                                onOpenStudio = { onOpenPenStudio(highlighterSlot.coerceAtLeast(0)); popover = Popover.NONE }
+                            )
+                            Popover.ERASER -> EraserPopover(vm)
+                            Popover.LASSO -> LassoPopover(vm)
+                            Popover.FILL -> FillPopover(vm)
+                            Popover.TAPE -> TapePopover(vm)
+                            Popover.LASER -> LaserPopover(vm)
+                            Popover.INSTRUMENT -> InstrumentPopover(vm)
+                            Popover.MORE -> MorePopover(
+                                fillSelected = tool == WorkspaceTool.FILL_BUCKET,
+                                rulerActive = instrument != GeometryInstrument.NONE,
+                                onFill = { popover = Popover.FILL; vm.setTool(WorkspaceTool.FILL_BUCKET) },
+                                onRuler = { popover = Popover.INSTRUMENT },
+                                onAudioPin = { popover = Popover.NONE; onOpenAudioPin() },
+                                onLayers = { popover = Popover.NONE; onOpenLayers() },
+                                current = edge,
+                                onPick = { vm.userPrefs.setDock(it, false); popover = Popover.NONE },
+                                onCollapse = { vm.userPrefs.setDock(edge, true); popover = Popover.NONE }
+                            )
+                            Popover.NONE -> Unit
+                        }
                     }
                 }
             }
-        }
 
-        val stripContent: @Composable () -> Unit = {
-            StripBody(edge = edge) {
-                StripButton(Icons.Rounded.Undo, "Undo", selected = false, enabled = canUndo) { vm.undo() }
-                StripButton(Icons.Rounded.Redo, "Redo", selected = false, enabled = canRedo) { vm.redo() }
-                StripDivider(vertical)
+            val stripContent: @Composable () -> Unit = {
+                StripBody(edge = edge) {
+                    StripButton(Icons.Rounded.Undo, "Undo", selected = false, enabled = canUndo) { vm.undo() }
+                    StripButton(Icons.Rounded.Redo, "Redo", selected = false, enabled = canRedo) { vm.redo() }
+                    StripDivider(vertical)
 
-                // Pen: angled nib in the live ink colour.
-                StripGlyphButton(
-                    label = "Pen",
-                    selected = tool == WorkspaceTool.INK && activeBrush != null && isPenGlyph(activeBrush.type),
-                    onClick = {
-                        val active = tool == WorkspaceTool.INK && activeBrush != null && isPenGlyph(activeBrush.type)
-                        if (active) toggle(Popover.PEN) else { popover = Popover.NONE; vm.selectPresetSlot(penSlot) }
+                    // Pen: angled nib in the live ink colour.
+                    StripGlyphButton(
+                        label = "Pen",
+                        selected = tool == WorkspaceTool.INK && activeBrush != null && isPenGlyph(activeBrush.type),
+                        onClick = {
+                            val active = tool == WorkspaceTool.INK && activeBrush != null && isPenGlyph(activeBrush.type)
+                            if (active) toggle(Popover.PEN) else { popover = Popover.NONE; vm.selectPresetSlot(penSlot) }
+                        }
+                    ) {
+                        BrushTypeIcon(penCfg?.type ?: BrushType.FOUNTAIN_PEN, Color(penCfg?.colorArgb ?: BrushConfigDefaultInk), size = 28.dp, angleDeg = 38f)
                     }
-                ) {
-                    BrushTypeIcon(penCfg?.type ?: BrushType.FOUNTAIN_PEN, Color(penCfg?.colorArgb ?: BrushConfigDefaultInk), size = 28.dp, angleDeg = 38f)
-                }
-                StripGlyphButton(
-                    label = "Highlighter",
-                    selected = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.HIGHLIGHTER,
-                    onClick = {
-                        val active = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.HIGHLIGHTER
-                        if (active) toggle(Popover.HIGHLIGHTER) else if (highlighterSlot >= 0) { popover = Popover.NONE; vm.selectPresetSlot(highlighterSlot) }
+                    StripGlyphButton(
+                        label = "Highlighter",
+                        selected = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.HIGHLIGHTER,
+                        onClick = {
+                            val active = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.HIGHLIGHTER
+                            if (active) toggle(Popover.HIGHLIGHTER) else if (highlighterSlot >= 0) { popover = Popover.NONE; vm.selectPresetSlot(highlighterSlot) }
+                        }
+                    ) {
+                        BrushTypeIcon(BrushType.HIGHLIGHTER, Color(highlighterCfg?.colorArgb ?: 0xFFFFD54A.toInt()), size = 28.dp, angleDeg = 38f)
                     }
-                ) {
-                    BrushTypeIcon(BrushType.HIGHLIGHTER, Color(highlighterCfg?.colorArgb ?: 0xFFFFD54A.toInt()), size = 28.dp, angleDeg = 38f)
-                }
-                StripGlyphButton("Eraser", tool == WorkspaceTool.ERASER, onClick = {
-                    if (tool == WorkspaceTool.ERASER) toggle(Popover.ERASER) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.ERASER) }
-                }) { BrushTypeIcon(BrushType.ERASER, Warm.Text, size = 28.dp) }
-                StripGlyphButton("Lasso", tool == WorkspaceTool.LASSO, onClick = {
-                    if (tool == WorkspaceTool.LASSO) toggle(Popover.LASSO) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.LASSO) }
-                }) { OmniVectorIcon(OmniIconKind.LASSO, Warm.AccentBlue, size = 28.dp) }
-                StripDivider(vertical)
-                StripGlyphButton("Stickers and shapes", false, onClick = { popover = Popover.NONE; onOpenStencils() }) {
-                    OmniVectorIcon(OmniIconKind.STICKERS, Warm.AccentBlue, size = 26.dp)
-                }
-                StripButton(Icons.Rounded.Image, "Image", selected = false) { popover = Popover.NONE; pickImage.launch("image/*") }
-                StripGlyphButton("Text box", false, onClick = { popover = Popover.NONE; onOpenTextBox() }) {
-                    OmniVectorIcon(OmniIconKind.TEXT_BOX, Warm.AccentBlue, size = 26.dp)
-                }
-                val tapeActive = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.STUDY_TAPE
-                StripGlyphButton("Study tape", tapeActive, onClick = {
-                    if (tapeActive) toggle(Popover.TAPE) else {
-                        if (tapeSlot >= 0) vm.selectPresetSlot(tapeSlot)
-                        popover = Popover.TAPE
+                    StripGlyphButton("Eraser", tool == WorkspaceTool.ERASER, onClick = {
+                        if (tool == WorkspaceTool.ERASER) toggle(Popover.ERASER) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.ERASER) }
+                    }) { BrushTypeIcon(BrushType.ERASER, Warm.Text, size = 28.dp) }
+                    StripGlyphButton("Lasso", tool == WorkspaceTool.LASSO, onClick = {
+                        if (tool == WorkspaceTool.LASSO) toggle(Popover.LASSO) else { popover = Popover.NONE; vm.setTool(WorkspaceTool.LASSO) }
+                    }) { OmniVectorIcon(OmniIconKind.LASSO, Warm.AccentBlue, size = 28.dp) }
+                    StripDivider(vertical)
+                    StripGlyphButton("Stickers and shapes", false, onClick = { popover = Popover.NONE; onOpenStencils() }) {
+                        OmniVectorIcon(OmniIconKind.STICKERS, Warm.AccentBlue, size = 26.dp)
                     }
-                }) { BrushTypeIcon(BrushType.STUDY_TAPE, Color(tapeCfg?.colorArgb ?: 0xFFF2C94C.toInt()), size = 28.dp) }
-                StripGlyphButton("Laser", tool == WorkspaceTool.LASER, onClick = {
-                    if (tool == WorkspaceTool.LASER) toggle(Popover.LASER) else { vm.setTool(WorkspaceTool.LASER); popover = Popover.LASER }
-                }) { BrushTypeIcon(BrushType.LASER_POINTER, Color(0xFFFF4D4D), size = 28.dp) }
-                StripDivider(vertical)
+                    StripButton(Icons.Rounded.Image, "Image", selected = false) { popover = Popover.NONE; pickImage.launch("image/*") }
+                    StripGlyphButton("Text box", false, onClick = { popover = Popover.NONE; onOpenTextBox() }) {
+                        OmniVectorIcon(OmniIconKind.TEXT_BOX, Warm.AccentBlue, size = 26.dp)
+                    }
+                    val tapeActive = tool == WorkspaceTool.INK && activeBrush?.type == BrushType.STUDY_TAPE
+                    StripGlyphButton("Study tape", tapeActive, onClick = {
+                        if (tapeActive) toggle(Popover.TAPE) else {
+                            if (tapeSlot >= 0) vm.selectPresetSlot(tapeSlot)
+                            popover = Popover.TAPE
+                        }
+                    }) { BrushTypeIcon(BrushType.STUDY_TAPE, Color(tapeCfg?.colorArgb ?: 0xFFF2C94C.toInt()), size = 28.dp) }
+                    StripGlyphButton("Laser", tool == WorkspaceTool.LASER, onClick = {
+                        if (tool == WorkspaceTool.LASER) toggle(Popover.LASER) else { vm.setTool(WorkspaceTool.LASER); popover = Popover.LASER }
+                    }) { BrushTypeIcon(BrushType.LASER_POINTER, Color(0xFFFF4D4D), size = 28.dp) }
+                    StripDivider(vertical)
 
-                if (activeBrush != null) {
-                    val palette = (AcademicPalettes.byId(prefs.activePalette).colors + prefs.customSwatches).take(3)
-                    CompactStyleDots(
-                        vertical = vertical,
-                        colors = palette,
-                        currentColor = activeBrush.colorArgb,
-                        currentWidth = activeBrush.widthMm,
-                        isHighlighter = activeBrush.type == BrushType.HIGHLIGHTER,
-                        onColor = { c -> vm.updatePresetSlot(activeSlot, activeBrush.copy(colorArgb = c)) },
-                        onWidth = { w -> vm.updatePresetSlot(activeSlot, activeBrush.copy(widthMm = w)) }
-                    )
+                    if (activeBrush != null) {
+                        val palette = (AcademicPalettes.byId(prefs.activePalette).colors + prefs.customSwatches).take(3)
+                        CompactStyleDots(
+                            vertical = vertical,
+                            colors = palette,
+                            currentColor = activeBrush.colorArgb,
+                            currentWidth = activeBrush.widthMm,
+                            isHighlighter = activeBrush.type == BrushType.HIGHLIGHTER,
+                            onColor = { c -> vm.updatePresetSlot(activeSlot, activeBrush.copy(colorArgb = c)) },
+                            onWidth = { w -> vm.updatePresetSlot(activeSlot, activeBrush.copy(widthMm = w)) }
+                        )
+                    }
+                    StripButton(Icons.Rounded.MoreHoriz, "More", selected = popover == Popover.MORE) { toggle(Popover.MORE) }
                 }
-                StripButton(Icons.Rounded.MoreHoriz, "More", selected = popover == Popover.MORE) { toggle(Popover.MORE) }
             }
-        }
 
-        val arrangement: @Composable () -> Unit = {
-            when (edge) {
-                DockEdge.BOTTOM -> Column(horizontalAlignment = Alignment.CenterHorizontally) { popoverContent(); stripContent() }
-                DockEdge.TOP -> Column(horizontalAlignment = Alignment.CenterHorizontally) { stripContent(); popoverContent() }
-                DockEdge.LEFT -> Row(verticalAlignment = Alignment.CenterVertically) { stripContent(); popoverContent() }
-                DockEdge.RIGHT -> Row(verticalAlignment = Alignment.CenterVertically) { popoverContent(); stripContent() }
+            val arrangement: @Composable () -> Unit = {
+                when (edge) {
+                    DockEdge.BOTTOM -> Column(horizontalAlignment = Alignment.CenterHorizontally) { popoverContent(); stripContent() }
+                    DockEdge.TOP -> Column(horizontalAlignment = Alignment.CenterHorizontally) { stripContent(); popoverContent() }
+                    DockEdge.LEFT -> Row(verticalAlignment = Alignment.CenterVertically) { stripContent(); popoverContent() }
+                    DockEdge.RIGHT -> Row(verticalAlignment = Alignment.CenterVertically) { popoverContent(); stripContent() }
+                }
             }
+            Box(Modifier.align(align)) { arrangement() }
         }
-        Box(Modifier.align(align)) { arrangement() }
     }
 }
 
@@ -282,7 +294,7 @@ private fun StripBody(edge: DockEdge, content: @Composable () -> Unit) {
         Column(
             Modifier
                 .width(DockStripWidth)
-                .glass(shape, raised = true, elevation = 12.dp)
+                .solidPanel(shape)
                 .verticalScroll(rememberScrollState())
                 .padding(vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -292,7 +304,7 @@ private fun StripBody(edge: DockEdge, content: @Composable () -> Unit) {
         Row(
             Modifier
                 .height(DockStripWidth)
-                .glass(shape, raised = true, elevation = 12.dp)
+                .solidPanel(shape)
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -363,7 +375,7 @@ internal fun formatMm(mm: Float): String = when {
 private fun MiniPill(modifier: Modifier, type: BrushType, color: Int, onExpand: () -> Unit) {
     Row(
         modifier
-            .glass(RoundedCornerShape(50), raised = true, elevation = 12.dp)
+            .solidPanel(RoundedCornerShape(50))
             .clickable(onClick = onExpand)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,

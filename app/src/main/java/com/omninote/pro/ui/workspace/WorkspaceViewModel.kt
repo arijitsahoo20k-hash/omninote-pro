@@ -1075,6 +1075,15 @@ class WorkspaceViewModel(
         view?.let { publishViewport(it.viewport) }
     }
 
+    /** Smallest zoom the view allows, in percent, rounded up so the slider never offers an unreachable value. */
+    fun minZoomPercent(): Int =
+        kotlin.math.ceil((view?.minZoom() ?: ViewportTransform.MIN_ZOOM) * 100f).toInt()
+
+    /** The zoom slider's thumb is held (true) or released (false); see [FrontBufferedInkView.setExternalZoomInProgress]. */
+    fun setZoomSliderActive(active: Boolean) {
+        view?.setExternalZoomInProgress(active)
+    }
+
     fun fitToWidth() {
         val v = view ?: return
         v.setViewport(v.fitViewport())

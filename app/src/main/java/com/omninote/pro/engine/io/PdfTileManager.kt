@@ -25,6 +25,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -40,6 +42,7 @@ import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.sqrt
 
 /**
  * High-fps, memory-bounded PDF page renderer for the dry layer, in two layers and no tile grid.
@@ -48,11 +51,12 @@ import kotlin.math.pow
  * dedicated thread under a [Mutex] that also guards open and close. [draw] only reads caches and enqueues work; it
  * never blocks on PDF rendering.
  *
- * Layer 1: the whole page rendered once at [BASE_LONG_EDGE_PX] on its longest edge (ARGB_8888, pre-filled white) and
+ * Layer 1: the whole page rendered once at [baseLongEdgePx] on its longest edge (ARGB_8888, pre-filled white) and
  * kept in an [LruCache]. It is drawn first, so the full page is always visible with nothing missing.
  *
- * Layer 2: once zoom exceeds [REGION_ZOOM_THRESHOLD] and the viewport has been still ([gestureActive] is false, which
- * the host clears ~120 ms after the last gesture frame), ONE bitmap covering the visible rectangle (plus a small
+ * Layer 2: whenever the base bitmap is too coarse for the current on-screen scale (base px/mm < 0.9 x screen px/mm,
+ * so no zoom threshold is involved) and the viewport has been still ([gestureActive] is false, which the host clears
+ * ~120 ms after the last gesture frame), ONE bitmap covering the visible rectangle (plus a small
  * margin) is rendered at the on-screen resolution and swapped in atomically when finished. The previous region stays
  * on screen until the new one is ready, and nothing is ever recycled by hand: evicted bitmaps are left to the GC, so
  * a bitmap a frame still references can never be "used after recycle".
@@ -63,9 +67,12 @@ class PdfTileManager(
     baseCacheBytes: Int = defaultBudget(0.10f, 72),
     tileCacheBytes: Int = defaultBudget(0.14f, 96)
 ) {
-    /** Invoked on the PDF render thread when new pixels are available. Marshal to the UI thread and redraw. */
+    /**
+     * Invoked on the PDF render thread when new pixels are available for ([notebookId], [pdfPageIndex]); the index is
+     * [ANY_PAGE] when the whole document is affected (it just opened). Marshal to the UI thread and redraw.
+     */
     @Volatile
-    var onTileReady: (() -> Unit)? = null
+    var onTileReady: ((notebookId: String, pdfPageIndex: Int) -> Unit)? = null
 
     private class OpenPdf(val pfd: ParcelFileDescriptor, val renderer: PdfRenderer, val pagePts: IntArray) {
         val pageCount: Int get() = renderer.pageCount
@@ -85,6 +92,8 @@ class PdfTileManager(
         val scale: Float
     )
 
+    private data class ThumbKey(val notebookId: String, val pdfPageIndex: Int, val widthPx: Int)
+
     private data class RegionSpec(val left: Float, val top: Float, val right: Float, val bottom: Float, val scale: Float)
 
     private val renderThread: ExecutorCoroutineDispatcher =
@@ -102,8 +111,17 @@ class PdfTileManager(
     private val regionCache = object : LruCache<PageKey, Region>(tileCacheBytes) {
         override fun sizeOf(key: PageKey, value: Region): Int = value.bitmap.allocationByteCount
     }
+    private val thumbCache = object : LruCache<ThumbKey, Bitmap>(
+        min((Runtime.getRuntime().maxMemory() * 0.08).toLong(), 24L * 1024L * 1024L).toInt()
+    ) {
+        override fun sizeOf(key: ThumbKey, value: Bitmap): Int = value.allocationByteCount
+    }
+
     /** Largest region raster, in pixels, that still leaves room for a second one in [regionCache]. */
     private val maxRegionPixels: Int = min(MAX_REGION_PIXELS, max(1_000_000, tileCacheBytes / 8))
+
+    /** Longest edge of the full-page bitmap: three square pages (4 bytes/px) must fit in the base cache. */
+    private val baseLongEdgePx: Int = min(2200, max(1200, sqrt(baseCacheBytes / 12.0).toInt()))
 
     private val basePending = HashMap<PageKey, Job>()
     private val regionPending = HashMap<PageKey, Job>()
@@ -128,9 +146,9 @@ class PdfTileManager(
 
     /**
      * Draws the PDF page behind [page]'s ink. Does nothing for pages that are not PDF-backed. Call right after the
-     * paper pass; pass the current [pxPerMm] and [zoom] (so the base scale is pxPerMm / zoom).
+     * paper pass; pass the current on-screen scale in [pxPerMm].
      */
-    fun draw(canvas: Canvas, page: NotebookPage, viewportMm: StrokeBounds, pxPerMm: Float, zoom: Float) {
+    fun draw(canvas: Canvas, page: NotebookPage, viewportMm: StrokeBounds, pxPerMm: Float) {
         val pdfIndex = page.pdfPageIndex ?: return
         val nb = page.notebookId
         val doc = synchronized(lock) { docs[nb] }
@@ -149,11 +167,7 @@ class PdfTileManager(
             requestBase(baseKey, doc, page.widthMm, page.heightMm)
         }
 
-        if (pxPerMm <= 0f || zoom <= 1f) {
-            cancelRegion(baseKey)
-            return
-        }
-        drawRegion(canvas, page, doc, baseKey, viewportMm, pxPerMm, zoom)
+        drawRegion(canvas, page, doc, baseKey, viewportMm, pxPerMm)
     }
 
     private fun drawRegion(
@@ -162,8 +176,7 @@ class PdfTileManager(
         doc: OpenPdf,
         key: PageKey,
         viewportMm: StrokeBounds,
-        pxPerMm: Float,
-        zoom: Float
+        pxPerMm: Float
     ) {
         val left = max(0f, viewportMm.left)
         val top = max(0f, viewportMm.top)
@@ -177,7 +190,14 @@ class PdfTileManager(
             dest.set(current.left, current.top, current.right, current.bottom)
             canvas.drawBitmap(current.bitmap, null, dest, bitmapPaint)
         }
-        if (zoom <= REGION_ZOOM_THRESHOLD || gestureActive) return
+
+        // The full-page bitmap is sharp enough already (or there is no scale yet): no region needed.
+        val basePxPerMm = baseLongEdgePx / max(page.widthMm, page.heightMm)
+        if (pxPerMm <= 0f || basePxPerMm >= pxPerMm * BASE_SHARP_ENOUGH) {
+            cancelRegion(key)
+            return
+        }
+        if (gestureActive) return
 
         val covers = current != null &&
             current.left <= left + COVER_SLACK_MM && current.top <= top + COVER_SLACK_MM &&
@@ -198,7 +218,7 @@ class PdfTileManager(
         val b = min(page.heightMm, bottom + my)
         var scale = pxPerMm
         val pixels = (r - l) * scale * (b - t) * scale
-        if (pixels > maxRegionPixels) scale *= kotlin.math.sqrt(maxRegionPixels / pixels)
+        if (pixels > maxRegionPixels) scale *= sqrt(maxRegionPixels / pixels)
         requestRegion(key, doc, page.widthMm, page.heightMm, RegionSpec(l, t, r, b, scale))
     }
 
@@ -225,11 +245,12 @@ class PdfTileManager(
             } finally {
                 synchronized(lock) { opening.remove(notebookId) }
             }
-            onTileReady?.invoke()
+            onTileReady?.invoke(notebookId, ANY_PAGE)
         }
     }
 
     private fun openLocked(notebookId: String) {
+        if (synchronized(lock) { docs.containsKey(notebookId) }) return
         val file = pdfFile(notebookId)
         if (!file.isFile) return
         val fd = try {
@@ -267,7 +288,7 @@ class PdfTileManager(
                     if (!isActive) return@launch
                     val bmp = mutex.withLock { renderBase(doc, key.pageIndex, widthMm, heightMm) } ?: return@launch
                     baseCache.put(key, bmp)
-                    onTileReady?.invoke()
+                    onTileReady?.invoke(key.notebookId, key.pageIndex)
                 } finally {
                     synchronized(lock) { basePending.remove(key) }
                 }
@@ -291,7 +312,7 @@ class PdfTileManager(
                     } ?: return@launch
                     // Atomic swap: the new region replaces the old one in a single put.
                     regionCache.put(key, Region(bmp, spec.left, spec.top, spec.right, spec.bottom, spec.scale))
-                    onTileReady?.invoke()
+                    onTileReady?.invoke(key.notebookId, key.pageIndex)
                 } finally {
                     synchronized(lock) {
                         if (regionWanted[key] == spec) regionPending.remove(key)
@@ -313,9 +334,18 @@ class PdfTileManager(
     // =====================================================================================
 
     private fun renderBase(doc: OpenPdf, index: Int, widthMm: Float, heightMm: Float): Bitmap? {
+        android.os.Trace.beginSection("OmniNote.renderBase")
+        try {
+            return renderBaseUntraced(doc, index, widthMm, heightMm)
+        } finally {
+            android.os.Trace.endSection()
+        }
+    }
+
+    private fun renderBaseUntraced(doc: OpenPdf, index: Int, widthMm: Float, heightMm: Float): Bitmap? {
         if (!isOpen(doc)) return null
         val longest = max(widthMm, heightMm)
-        val k = BASE_LONG_EDGE_PX / longest
+        val k = baseLongEdgePx / longest
         val w = max(1, (widthMm * k).toInt())
         val h = max(1, (heightMm * k).toInt())
         return try {
@@ -339,6 +369,15 @@ class PdfTileManager(
     }
 
     private fun renderRegion(doc: OpenPdf, index: Int, widthMm: Float, heightMm: Float, spec: RegionSpec): Bitmap? {
+        android.os.Trace.beginSection("OmniNote.renderRegion")
+        try {
+            return renderRegionUntraced(doc, index, widthMm, heightMm, spec)
+        } finally {
+            android.os.Trace.endSection()
+        }
+    }
+
+    private fun renderRegionUntraced(doc: OpenPdf, index: Int, widthMm: Float, heightMm: Float, spec: RegionSpec): Bitmap? {
         if (!isOpen(doc)) return null
         val w = max(1, ceil((spec.right - spec.left) * spec.scale).toInt())
         val h = max(1, ceil((spec.bottom - spec.top) * spec.scale).toInt())
@@ -366,6 +405,72 @@ class PdfTileManager(
         }
     }
 
+    // =====================================================================================
+    // Thumbnails (page sidebar, filmstrip)
+    // =====================================================================================
+
+    /**
+     * A white-filled thumbnail of PDF page [pdfPageIndex], [widthPx] wide (height follows the page's aspect), or null
+     * when the PDF cannot be read. Cached by (notebook, page, width). Runs on the render thread under the same mutex
+     * as every other [PdfRenderer] call, and yields to visible-page work: it waits (at most [THUMB_WAIT_MAX_MS]) while a
+     * base or region render is pending, and checks for cancellation before taking the mutex so a list item that
+     * scrolled away costs almost nothing.
+     */
+    suspend fun thumbnail(notebookId: String, pdfPageIndex: Int, widthPx: Int): Bitmap? {
+        if (widthPx <= 0 || pdfPageIndex < 0) return null
+        val key = ThumbKey(notebookId, pdfPageIndex, widthPx)
+        thumbCache.get(key)?.let { return it }
+        return withContext(renderThread) {
+            var waited = 0L
+            while (waited < THUMB_WAIT_MAX_MS && synchronized(lock) { basePending.isNotEmpty() || regionPending.isNotEmpty() }) {
+                delay(THUMB_POLL_MS)
+                waited += THUMB_POLL_MS
+            }
+            ensureActive()
+            mutex.withLock {
+                thumbCache.get(key)?.let { return@withLock it }
+                var doc = synchronized(lock) { docs[notebookId] }
+                if (doc == null) {
+                    openLocked(notebookId)
+                    doc = synchronized(lock) { docs[notebookId] }
+                }
+                if (doc == null || pdfPageIndex !in 0 until doc.pageCount) return@withLock null
+                renderThumb(doc, pdfPageIndex, widthPx)?.also { thumbCache.put(key, it) }
+            }
+        }
+    }
+
+    private fun renderThumb(doc: OpenPdf, index: Int, widthPx: Int): Bitmap? {
+        android.os.Trace.beginSection("OmniNote.renderThumb")
+        try {
+            if (!isOpen(doc)) return null
+            val ptsW = doc.widthPts(index).coerceAtLeast(1)
+            val ptsH = doc.heightPts(index).coerceAtLeast(1)
+            val h = max(1, (widthPx.toFloat() * ptsH / ptsW).toInt())
+            return try {
+                val bmp = Bitmap.createBitmap(widthPx, h, Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(Color.WHITE)
+                val page = doc.renderer.openPage(index)
+                try {
+                    val m = Matrix()
+                    m.setScale(widthPx.toFloat() / ptsW, h.toFloat() / ptsH)
+                    page.render(bmp, null, m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                } finally {
+                    page.close()
+                }
+                bmp
+            } catch (e: Exception) {
+                null
+            } catch (e: OutOfMemoryError) {
+                thumbCache.evictAll()
+                null
+            }
+        } finally {
+            android.os.Trace.endSection()
+        }
+    }
+
+
     private fun isOpen(doc: OpenPdf): Boolean = synchronized(lock) { docs.containsValue(doc) }
 
     // =====================================================================================
@@ -376,6 +481,7 @@ class PdfTileManager(
     fun trimMemory() {
         baseCache.evictAll()
         regionCache.evictAll()
+        thumbCache.evictAll()
     }
 
     /** Closes one notebook's PDF and forgets its cached pixels. */
@@ -383,6 +489,7 @@ class PdfTileManager(
         val doc = synchronized(lock) { docs.remove(notebookId) } ?: return
         baseCache.snapshot().keys.filter { it.notebookId == notebookId }.forEach { baseCache.remove(it) }
         regionCache.snapshot().keys.filter { it.notebookId == notebookId }.forEach { regionCache.remove(it) }
+        thumbCache.snapshot().keys.filter { it.notebookId == notebookId }.forEach { thumbCache.remove(it) }
         synchronized(lock) {
             regionWanted.keys.removeAll { it.notebookId == notebookId }
             regionPending.entries.removeAll { (k, j) -> (k.notebookId == notebookId).also { hit -> if (hit) j.cancel() } }
@@ -403,6 +510,7 @@ class PdfTileManager(
         }
         baseCache.evictAll()
         regionCache.evictAll()
+        thumbCache.evictAll()
         for ((id, doc) in all) closeDoc(id, doc)
         renderThread.close()
     }
@@ -423,15 +531,18 @@ class PdfTileManager(
         }
     }
 
-    private companion object {
-        const val BASE_LONG_EDGE_PX = 1600
-        const val REGION_ZOOM_THRESHOLD = 1.5f
-        const val REGION_MARGIN = 0.12f
-        const val COVER_SLACK_MM = 0.6f
-        const val MAX_REGION_PIXELS = 5_000_000
-        const val MAX_OPEN_DOCS = 2
+    companion object {
+        /** A region is requested only when the base raster is below this fraction of the on-screen scale. */
+        private const val BASE_SHARP_ENOUGH = 0.9f
+        const val ANY_PAGE = -1
+        private const val REGION_MARGIN = 0.08f
+        private const val COVER_SLACK_MM = 0.6f
+        private const val MAX_REGION_PIXELS = 7_000_000
+        private const val MAX_OPEN_DOCS = 2
+        private const val THUMB_WAIT_MAX_MS = 400L
+        private const val THUMB_POLL_MS = 25L
 
-        fun defaultBudget(fractionOfHeap: Float, capMb: Int): Int =
+        private fun defaultBudget(fractionOfHeap: Float, capMb: Int): Int =
             min((Runtime.getRuntime().maxMemory() * fractionOfHeap).toLong(), capMb * 1024L * 1024L).toInt()
     }
 }

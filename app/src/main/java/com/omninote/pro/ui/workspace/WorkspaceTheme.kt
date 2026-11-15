@@ -57,6 +57,11 @@ object Warm {
     val Warn = Color(0xFFE5B85C)
     val Scrim = Color(0x99080D18)
     val Divider = Color(0x26CBD5E1)
+
+    // Fully opaque equivalents of Glass / GlassRaised composited over Backdrop (for panels that must not show a shadow
+    // or the canvas through themselves).
+    val SolidGlass = Color(0xFF18243F)
+    val SolidGlassRaised = Color(0xFF1E2C4C)
 }
 
 @Composable
@@ -87,6 +92,21 @@ fun Modifier.glass(shape: Shape = RoundedCornerShape(20.dp), raised: Boolean = f
             ),
             shape
         )
+        .border(BorderStroke(1.dp, Warm.GlassEdge), shape)
+
+/**
+ * Opaque panel with a hairline edge and a restrained shadow. Use where translucent [glass] would let its own (or a
+ * neighbour's) shadow show through the fill and read as a halo.
+ */
+fun Modifier.solidPanel(shape: Shape = RoundedCornerShape(20.dp), elevation: Dp = 6.dp): Modifier =
+    this
+        .shadow(
+            elevation, shape, clip = false,
+            ambientColor = Color.Black.copy(alpha = 0.25f),
+            spotColor = Color.Black.copy(alpha = 0.35f)
+        )
+        .clip(shape)
+        .background(Brush.verticalGradient(listOf(Warm.SolidGlassRaised, Warm.SolidGlass)), shape)
         .border(BorderStroke(1.dp, Warm.GlassEdge), shape)
 
 @Composable

@@ -79,6 +79,7 @@ fun WorkspaceScreen(
         var showAudio by remember { mutableStateOf(false) }
         var showExport by remember { mutableStateOf(false) }
         var showTextBox by remember { mutableStateOf(false) }
+        var showPageSidebar by rememberSaveable { mutableStateOf(false) }
         var confirmDeletePage by remember { mutableStateOf(false) }
         var container by remember { mutableStateOf(IntSize.Zero) }
 
@@ -120,13 +121,14 @@ fun WorkspaceScreen(
             if (selection != null) vm.lassoClear() else vm.setInstrument(instrument)
         }
         // 1) any modal or sheet.
-        BackHandler(enabled = studioSlot != null || showLayers || showStencils || showTemplates || showExport) {
+        BackHandler(enabled = studioSlot != null || showLayers || showStencils || showTemplates || showExport || (showPageSidebar && hasPdfPages(pages))) {
             when {
                 studioSlot != null -> studioSlot = null
                 showLayers -> showLayers = false
                 showStencils -> showStencils = false
                 showTemplates -> showTemplates = false
-                else -> showExport = false
+                showExport -> showExport = false
+                else -> showPageSidebar = false
             }
         }
 
@@ -157,7 +159,9 @@ fun WorkspaceScreen(
         ) {
             InkCanvasHost(
                 vm,
-                Modifier.padding(start = dockStart, end = dockEnd, top = chromeTop + dockTop, bottom = dockBottom)
+                Modifier.padding(start = dockStart, end = dockEnd, top = chromeTop + dockTop, bottom = dockBottom),
+                pageSidebarOpen = showPageSidebar,
+                onClosePageSidebar = { showPageSidebar = false }
             )
 
             AnimatedVisibility(
@@ -192,6 +196,9 @@ fun WorkspaceScreen(
                     onToggleRead = vm::toggleReadMode,
                     onToggleHoldToSnap = { vm.userPrefs.setHoldToSnap(!prefs.holdToSnapEnabled) },
                     onOpenLayers = { showLayers = true },
+                    showPagesToggle = hasPdfPages(pages),
+                    pagesPanelOpen = showPageSidebar,
+                    onTogglePagesPanel = { showPageSidebar = !showPageSidebar },
                     onDuplicatePage = vm::duplicateCurrentPage,
                     onDeletePage = { confirmDeletePage = true },
                     onExport = { showExport = true },
